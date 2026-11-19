@@ -1,0 +1,14 @@
+# Build output
+build/
+*.pkg
+pkg.gp4
+eboot.bin
+sce_sys/param.sfo
+
+# Copied from the OpenOrbis toolchain by the Makefile
+sce_sys/about/
+sce_module/
+
+# Test videos packed into the package are personal, never commit them
+assets/videos/*
+!assets/videos/.gitkeep
