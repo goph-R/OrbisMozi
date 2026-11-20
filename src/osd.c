@@ -93,6 +93,19 @@ int osd_text(uint32_t *fb, int fb_w, int fb_h, int x, int y,
     return x;
 }
 
+void osd_fill(uint32_t *fb, int fb_w, int fb_h, int x, int y, int w, int h, uint32_t colour)
+{
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > fb_w) w = fb_w - x;
+    if (y + h > fb_h) h = fb_h - y;
+    for (int row = 0; row < h; row++) {
+        uint32_t *dst = fb + (size_t)(y + row) * fb_w + x;
+        for (int col = 0; col < w; col++)
+            dst[col] = colour;
+    }
+}
+
 int osd_font_width(void)  { return FONT_W; }
 int osd_font_height(void) { return FONT_H; }
 

@@ -197,19 +197,6 @@ static int count(void)
 
 /* --- drawing ------------------------------------------------------------- */
 
-static void fill(uint32_t *fb, int W, int H, int x, int y, int w, int h, uint32_t colour)
-{
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > W) w = W - x;
-    if (y + h > H) h = H - y;
-    for (int row = 0; row < h; row++) {
-        uint32_t *dst = fb + (size_t)(y + row) * W + x;
-        for (int col = 0; col < w; col++)
-            dst[col] = colour;
-    }
-}
-
 /* Copies at most max_chars characters of UTF-8 text, ending with "..." if cut. */
 static void shorten(char *out, size_t out_size, const char *text, int max_chars)
 {
@@ -263,7 +250,7 @@ static void draw(const char *busy)
     char text[1300], line[1300];
     int n = count();
 
-    fill(fb, W, H, 0, 0, W, H, COL_BG);
+    osd_fill(fb, W, H, 0, 0, W, H, COL_BG);
 
     osd_text(fb, W, H, margin_x, margin_y, "Orbis Mozi", COL_TEXT, COL_BG);
     if (B.cur[0]) {
@@ -291,7 +278,7 @@ static void draw(const char *busy)
 
         label_of(i, text, sizeof(text), &is_dir);
         if (i == B.sel)
-            fill(fb, W, H, margin_x, y, W - 2 * margin_x, row_h, bg);
+            osd_fill(fb, W, H, margin_x, y, W - 2 * margin_x, row_h, bg);
         shorten(line, sizeof(line), text, cols - (is_dir && B.cur[0] ? 1 : 0));
         int x = osd_text(fb, W, H, margin_x + fw, y + 4, line,
                          i == B.sel ? 0xFFFFFFFFu : is_dir ? COL_FOLDER : COL_TEXT, bg);

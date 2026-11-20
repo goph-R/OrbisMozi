@@ -19,6 +19,9 @@ void osd_show_log(void);
 int  osd_text(uint32_t *fb, int fb_w, int fb_h, int x, int y,
               const char *text, uint32_t fg, uint32_t bg);
 
+/* Fills a rectangle, clipped to the buffer. */
+void osd_fill(uint32_t *fb, int fb_w, int fb_h, int x, int y, int w, int h, uint32_t colour);
+
 int  osd_font_width(void);
 int  osd_font_height(void);
 

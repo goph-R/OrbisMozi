@@ -6,7 +6,12 @@
  *   main    shows each frame when the audio clock reaches its timestamp
  *
  * Audio is the master clock: sound plays at the device's own pace and the
- * picture follows it, so the two cannot drift apart. */
+ * picture follows it, so the two cannot drift apart.
+ *
+ * Seeking: the demux thread repositions the file, empties the packet queues
+ * and increases P.serial. Everything in flight carries the serial it was
+ * made under; a decoder that sees a new serial flushes itself, and frames or
+ * sound with an old serial are thrown away. */
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -44,6 +49,7 @@ typedef struct {
 typedef struct {
     AVFrame *frame;
     double   pts;
+    int      serial;
 } QFrame;
 
 static struct {
@@ -58,6 +64,11 @@ static struct {
     int              fq_head, fq_n;
     int              demux_eof, vdec_eof, adec_eof, quit;
     int              paused;
+
+    int              serial;            /* increased by every completed seek */
+    int              seek_req;
+    double           seek_target;       /* seconds, in stream time */
+    double           seek_from;         /* position the seek started from */
 
     /* Audio clock: timestamp of the next sample to be queued, and when. */
     double           aclock_pts;
@@ -74,8 +85,9 @@ static void pktq_push(PktQ *q, AVPacket *pkt)
     q->bytes += pkt->size;
 }
 
-/* Returns 1 with a packet, 0 at end of stream, -1 when asked to quit. */
-static int pktq_pop(PktQ *q, AVPacket **out)
+/* Returns 1 with a packet, 0 at end of stream, -1 when asked to quit.
+ * *serial tells which seek generation the answer belongs to. */
+static int pktq_pop(PktQ *q, AVPacket **out, int *serial)
 {
     int rc;
 
@@ -83,6 +95,7 @@ static int pktq_pop(PktQ *q, AVPacket **out)
     while (!P.quit && q->n == 0 && !P.demux_eof)
         pthread_cond_wait(&P.cond, &P.lock);
 
+    *serial = P.serial;
     if (P.quit) {
         rc = -1;
     } else if (q->n > 0) {
@@ -106,6 +119,7 @@ static void pktq_clear(PktQ *q)
         q->head = (q->head + 1) % PKTQ_CAP;
         q->n--;
     }
+    q->bytes = 0;
 }
 
 static int demux_must_wait(void)
@@ -128,12 +142,42 @@ static void *demux_thread(void *arg)
 
     for (;;) {
         pthread_mutex_lock(&P.lock);
-        while (!P.quit && demux_must_wait())
+        while (!P.quit && !P.seek_req && (P.demux_eof || demux_must_wait()))
             pthread_cond_wait(&P.cond, &P.lock);
-        int quit = P.quit;
+        int quit = P.quit, seek = P.seek_req;
+        double target = P.seek_target, from = P.seek_from;
         pthread_mutex_unlock(&P.lock);
         if (quit)
             break;
+
+        if (seek) {
+            /* Land on a key frame on the far side of where we came from,
+             * so that every press moves the picture. */
+            int64_t ts = (int64_t)(target * AV_TIME_BASE);
+            int64_t rel = (int64_t)((target - from) * AV_TIME_BASE);
+            int64_t lo = rel > 0 ? ts - rel + 2 : INT64_MIN;
+            int64_t hi = rel < 0 ? ts - rel - 2 : INT64_MAX;
+            int rc = avformat_seek_file(P.fmt, -1, lo, ts, hi, 0);
+            if (rc < 0)
+                osd_log("seek to %.1f s failed: %s", target, av_err2str(rc));
+            else
+                osd_log("seek %+.0f s to %.1f s", target - from, target);
+
+            pthread_mutex_lock(&P.lock);
+            if (rc >= 0) {
+                pktq_clear(&P.vq);
+                pktq_clear(&P.aq);
+                P.serial++;
+                P.demux_eof = 0;
+                P.vdec_eof = 0;                     /* the decoder is about to get new work */
+                P.aclock_valid = 0;
+            }
+            if (P.seek_target == target)            /* otherwise a newer request is waiting */
+                P.seek_req = 0;
+            pthread_cond_broadcast(&P.cond);
+            pthread_mutex_unlock(&P.lock);
+            continue;
+        }
 
         AVPacket *pkt = av_packet_alloc();
         int rc = av_read_frame(P.fmt, pkt);
@@ -141,7 +185,11 @@ static void *demux_thread(void *arg)
             if (rc != AVERROR_EOF)
                 osd_log("read error: %s", av_err2str(rc));
             av_packet_free(&pkt);
-            break;
+            pthread_mutex_lock(&P.lock);            /* stay around: a seek may follow */
+            P.demux_eof = 1;
+            pthread_cond_broadcast(&P.cond);
+            pthread_mutex_unlock(&P.lock);
+            continue;
         }
 
         pthread_mutex_lock(&P.lock);
@@ -154,12 +202,23 @@ static void *demux_thread(void *arg)
         pthread_cond_broadcast(&P.cond);
         pthread_mutex_unlock(&P.lock);
     }
-
-    pthread_mutex_lock(&P.lock);
-    P.demux_eof = 1;
-    pthread_cond_broadcast(&P.cond);
-    pthread_mutex_unlock(&P.lock);
     return NULL;
+}
+
+/* A decoder thread has played out everything: reports it through *eof_flag
+ * and sleeps until a seek gives it new work. Returns 0 to carry on, -1 to quit. */
+static int wait_for_seek(int *eof_flag, int my_serial)
+{
+    pthread_mutex_lock(&P.lock);
+    *eof_flag = 1;
+    pthread_cond_broadcast(&P.cond);
+    while (!P.quit && P.serial == my_serial)
+        pthread_cond_wait(&P.cond, &P.lock);
+    int quit = P.quit;
+    if (!quit)
+        *eof_flag = 0;
+    pthread_mutex_unlock(&P.lock);
+    return quit ? -1 : 0;
 }
 
 /* --- video decode thread ------------------------------------------------ */
@@ -171,14 +230,19 @@ static void *video_thread(void *arg)
     double frame_dur = st->avg_frame_rate.num > 0 ? 1.0 / av_q2d(st->avg_frame_rate) : 1.0 / 25.0;
     double next_pts = 0.0;
     AVFrame *frame = av_frame_alloc();
-    int stop = 0;
+    int stop = 0, my_serial = 0;
     (void)arg;
 
     while (!stop) {
         AVPacket *pkt = NULL;
-        int got = pktq_pop(&P.vq, &pkt);
+        int serial;
+        int got = pktq_pop(&P.vq, &pkt, &serial);
         if (got < 0)
             break;
+        if (serial != my_serial) {                  /* a seek happened: start afresh */
+            avcodec_flush_buffers(P.vdec);
+            my_serial = serial;
+        }
 
         int rc = avcodec_send_packet(P.vdec, got ? pkt : NULL);   /* NULL = drain */
         av_packet_free(&pkt);
@@ -203,13 +267,14 @@ static void *video_thread(void *arg)
             slot->frame = av_frame_alloc();
             av_frame_move_ref(slot->frame, frame);
             slot->pts = pts;
+            slot->serial = my_serial;
             P.fq_n++;
             pthread_cond_broadcast(&P.cond);
             pthread_mutex_unlock(&P.lock);
         }
 
-        if (!got)
-            break;                                  /* drained */
+        if (!got && !stop && wait_for_seek(&P.vdec_eof, my_serial) < 0)
+            break;                                  /* drained, then asked to quit */
     }
 
     av_frame_free(&frame);
@@ -235,21 +300,29 @@ static void *audio_thread(void *arg)
     int16_t *buf = NULL;                 /* converted audio waiting to be played */
     int cap = 0, rd = 0, buffered = 0;   /* in stereo frames */
     double buf_pts = NAN;                /* timestamp of buf[rd] */
-    int stop = 0;
+    int stop = 0, my_serial = 0;
     (void)arg;
 
     while (!stop) {
         AVPacket *pkt = NULL;
-        int got = pktq_pop(&P.aq, &pkt);
+        int serial, stale = 0;
+        int got = pktq_pop(&P.aq, &pkt, &serial);
         if (got < 0)
             break;
+        if (serial != my_serial) {                  /* a seek happened: forget what was buffered */
+            avcodec_flush_buffers(P.adec);
+            swr_free(&swr);
+            my_serial = serial;
+            rd = buffered = 0;
+            buf_pts = NAN;
+        }
 
         int rc = avcodec_send_packet(P.adec, got ? pkt : NULL);
         av_packet_free(&pkt);
         if (rc < 0 && rc != AVERROR(EAGAIN) && rc != AVERROR_EOF && rc != AVERROR_INVALIDDATA)
             osd_log("audio decode error: %s", av_err2str(rc));
 
-        while (!stop && avcodec_receive_frame(P.adec, frame) == 0) {
+        while (!stop && !stale && avcodec_receive_frame(P.adec, frame) == 0) {
             /* (Re)create the converter when the input format changes. */
             if (!swr || frame->sample_rate != in_rate || frame->format != in_fmt ||
                 av_channel_layout_compare(&frame->ch_layout, &in_layout) != 0) {
@@ -291,11 +364,12 @@ static void *audio_thread(void *arg)
 
             while (buffered >= AUDIO_GRAIN) {
                 pthread_mutex_lock(&P.lock);
-                while (P.paused && !P.quit)
+                while (P.paused && !P.quit && P.serial == my_serial)
                     pthread_cond_wait(&P.cond, &P.lock);
                 stop = P.quit;
+                stale = P.serial != my_serial;      /* a seek overtook this sound */
                 pthread_mutex_unlock(&P.lock);
-                if (stop)
+                if (stop || stale)
                     break;
 
                 plat_audio_write(buf + rd * 2);
@@ -305,9 +379,11 @@ static void *audio_thread(void *arg)
                 pthread_mutex_lock(&P.lock);
                 if (!isnan(buf_pts)) {
                     buf_pts += (double)AUDIO_GRAIN / AUDIO_RATE;
-                    P.aclock_pts = buf_pts;
-                    P.aclock_time = plat_time_us();
-                    P.aclock_valid = 1;
+                    if (P.serial == my_serial) {
+                        P.aclock_pts = buf_pts;
+                        P.aclock_time = plat_time_us();
+                        P.aclock_valid = 1;
+                    }
                 }
                 stop = P.quit;
                 pthread_mutex_unlock(&P.lock);
@@ -316,7 +392,7 @@ static void *audio_thread(void *arg)
             }
         }
 
-        if (!got)
+        if (!got && !stop && !stale && wait_for_seek(&P.adec_eof, my_serial) < 0)
             break;
     }
 
@@ -409,8 +485,9 @@ static int scaler_setup(Scaler *s, const AVFrame *f, AVRational stream_sar)
     return 0;
 }
 
-/* Current playback position in seconds, or NAN if not known yet. */
-static double master_clock(uint64_t wall_start, double first_pts)
+/* Current playback position in stream time, or NAN if not known yet.
+ * wall_base/wall_start describe the fallback clock used without sound. */
+static double master_clock(uint64_t wall_start, double wall_base)
 {
     uint64_t now = plat_time_us();
     double clock = NAN;
@@ -424,13 +501,48 @@ static double master_clock(uint64_t wall_start, double first_pts)
                 since = 0.1;
             clock = P.aclock_pts - AUDIO_LATENCY + since;
         } else if (P.adec_eof) {
-            clock = first_pts + (double)(now - wall_start) / 1e6;   /* audio failed */
+            clock = wall_base + (double)(now - wall_start) / 1e6;   /* no sound (left) */
         }
         pthread_mutex_unlock(&P.lock);
     } else {
-        clock = first_pts + (double)(now - wall_start) / 1e6;
+        clock = wall_base + (double)(now - wall_start) / 1e6;
     }
     return clock;
+}
+
+static void format_time(char *out, size_t out_size, double seconds)
+{
+    int s = seconds > 0 ? (int)seconds : 0;
+    snprintf(out, out_size, "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60);
+}
+
+/* Position bar near the bottom of the picture. duration <= 0: unknown. */
+static void draw_progress(uint32_t *fb, int W, int H, double position, double duration)
+{
+    int fh = osd_font_height(), fw = osd_font_width();
+    int x = W / 20, w = W - 2 * x;
+    int box_h = fh + 34, y = H - H / 20 - box_h;
+    const uint32_t bg = 0xFF101428u;
+    char a[32], b[32], text[80];
+
+    format_time(a, sizeof(a), position);
+    if (duration > 0) {
+        format_time(b, sizeof(b), duration);
+        snprintf(text, sizeof(text), "%s / %s", a, b);
+    } else {
+        snprintf(text, sizeof(text), "%s", a);
+    }
+
+    osd_fill(fb, W, H, x, y, w, box_h, bg);
+    osd_text(fb, W, H, x + 2 * fw, y + 8, text, 0xFFFFFFFFu, bg);
+    if (duration > 0) {
+        int bar_w = w - 4 * fw;
+        double part = position / duration;
+        if (part < 0) part = 0;
+        if (part > 1) part = 1;
+        osd_fill(fb, W, H, x + 2 * fw, y + fh + 16, bar_w, 8, 0xFF404860u);
+        osd_fill(fb, W, H, x + 2 * fw, y + fh + 16, (int)(bar_w * part), 8, 0xFF4F8FFFu);
+    }
 }
 
 static void log_to_screen(void *avcl, int level, const char *fmt, va_list ap)
@@ -595,26 +707,68 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         pthread_create(&audio_t, NULL, audio_thread, NULL);
 
     /* --- display loop --- */
-    uint64_t wall_start = 0, last_stat = 0;
-    double first_pts = NAN, last_diff = 0.0, convert_total = 0.0;
+    static int show_stats;                          /* triangle toggles; kept between files */
+    uint64_t wall_start = 0, last_stat = 0, pause_start = 0, bar_until = 0;
+    double wall_base = NAN, last_diff = 0.0, convert_total = 0.0;
+    double origin = P.fmt->start_time != AV_NOPTS_VALUE ? (double)P.fmt->start_time / AV_TIME_BASE : NAN;
+    double duration = P.fmt->duration > 0 ? (double)P.fmt->duration / AV_TIME_BASE : 0.0;
+    double pos = NAN;                               /* last known position, stream time */
+    double seek_goal = 0.0;
+    int seeking = 0, shown_serial = -1, bar_on = 0;
     int consecutive_drops = 0, shown_this_sec = 0, fps_now = 0;
     char stat_line[160] = "";
     int failed = 0, paused = 0;
     unsigned pad_prev = plat_pad();                 /* ignore buttons still held from the menu */
-    uint64_t pause_start = 0;
 
     for (;;) {
         QFrame qf = { 0 };
-        int have, done;
+        int have, done, serial_now, seek_pending;
+        uint64_t now = plat_time_us();
 
-        /* Controller: circle stops, cross pauses and continues. */
+        /* Controller: circle stops, cross pauses and continues, the d-pad
+         * and L1/R1 jump, triangle shows the diagnostics line. */
         unsigned pad = plat_pad();
         unsigned pressed = pad & ~pad_prev;
+        double step = 0.0;
         pad_prev = pad;
+
         if (pressed & PAD_CIRCLE)
             break;
-        if (pressed & PAD_CROSS) {
-            uint64_t now = plat_time_us();
+        if (pressed & PAD_TRIANGLE) {
+            show_stats = !show_stats;
+            scaler.clear_pending = 2;               /* wipe the line off both buffers */
+        }
+        if (pressed & PAD_RIGHT) step += 10.0;
+        if (pressed & PAD_LEFT)  step -= 10.0;
+        if (pressed & PAD_UP)    step += 60.0;
+        if (pressed & PAD_DOWN)  step -= 60.0;
+        if (pressed & PAD_R1)    step += 600.0;
+        if (pressed & PAD_L1)    step -= 600.0;
+
+        int toggle_pause = (pressed & PAD_CROSS) != 0;
+        if (step != 0.0 && !isnan(pos)) {
+            double base = seeking ? seek_goal : pos;
+            double target = base + step;
+            if (duration > 0 && target > origin + duration - 5.0)
+                target = origin + duration - 5.0;
+            if (target < origin)
+                target = origin;
+
+            if (fabs(target - base) > 0.5) {        /* not already at that end of the file */
+                pthread_mutex_lock(&P.lock);
+                P.seek_target = target;
+                P.seek_from = base;
+                P.seek_req = 1;
+                pthread_cond_broadcast(&P.cond);
+                pthread_mutex_unlock(&P.lock);
+                seeking = 1;
+                seek_goal = target;
+            }
+            bar_until = now + 3000000;
+            if (paused)
+                toggle_pause = 1;                   /* jumping continues playback */
+        }
+        if (toggle_pause) {
             paused = !paused;
             pthread_mutex_lock(&P.lock);
             P.paused = paused;
@@ -636,7 +790,9 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         have = P.fq_n > 0;
         if (have)
             qf = P.fq[P.fq_head];
-        done = P.vdec_eof && P.fq_n == 0;
+        serial_now = P.serial;
+        seek_pending = P.seek_req;
+        done = P.vdec_eof && P.fq_n == 0 && !P.seek_req;
         pthread_mutex_unlock(&P.lock);
 
         if (!have) {
@@ -646,24 +802,37 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             continue;
         }
 
-        if (isnan(first_pts)) {
-            first_pts = qf.pts;
-            wall_start = plat_time_us();
+        int stale = qf.serial != serial_now;        /* decoded before the last seek */
+        if (!stale && qf.serial != shown_serial) {  /* first picture, or first after a seek */
+            shown_serial = qf.serial;
+            wall_base = qf.pts;
+            wall_start = now;
+            consecutive_drops = 0;
+            if (isnan(origin))
+                origin = qf.pts;
+            if (isnan(pos))
+                pos = qf.pts;
+            if (!seek_pending)
+                seeking = 0;
         }
 
-        double clock = master_clock(wall_start, first_pts);
-        if (isnan(clock)) {                         /* audio has not started yet */
-            plat_sleep_us(2000);
-            continue;
-        }
-        if (max_seconds > 0 && clock - first_pts > max_seconds)
-            break;
+        double clock = NAN, diff = 0.0;
+        if (!stale) {
+            clock = master_clock(wall_start, wall_base);
+            if (isnan(clock)) {                     /* audio has not (re)started yet */
+                plat_sleep_us(2000);
+                continue;
+            }
+            pos = clock;
+            if (max_seconds > 0 && clock - origin > max_seconds)
+                break;
 
-        double diff = qf.pts - clock;               /* > 0: frame is early */
-        if (diff > 0.008) {
-            double wait = diff - 0.004;
-            plat_sleep_us(wait > 0.010 ? 10000 : (unsigned)(wait * 1e6));
-            continue;
+            diff = qf.pts - clock;                  /* > 0: frame is early */
+            if (diff > 0.008) {
+                double wait = diff - 0.004;
+                plat_sleep_us(wait > 0.010 ? 10000 : (unsigned)(wait * 1e6));
+                continue;
+            }
         }
 
         /* Take the frame out of the queue. */
@@ -673,6 +842,11 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         int more = P.fq_n > 0;
         pthread_cond_broadcast(&P.cond);
         pthread_mutex_unlock(&P.lock);
+
+        if (stale) {
+            av_frame_free(&qf.frame);
+            continue;
+        }
 
         /* Far behind: skip showing it so the picture can catch up. */
         if (diff < -LATE_DROP && more && consecutive_drops < 10) {
@@ -694,6 +868,12 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             osd_log("picture: %dx%d %s -> %dx%d on a %dx%d screen", f->width, f->height,
                     av_get_pix_fmt_name(f->format), scaler.dst_w, scaler.dst_h,
                     plat_width(), plat_height());
+        }
+
+        /* The bar may have been drawn on the black borders: wipe it when its time is up. */
+        if (bar_on && now >= bar_until) {
+            bar_on = 0;
+            scaler.clear_pending = 2;
         }
 
         uint32_t *fb = plat_backbuffer();
@@ -719,21 +899,25 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             st.max_abs_av_diff_ms = fabs(diff) * 1000.0;
 
         /* Diagnostics line, refreshed once a second. */
-        uint64_t now = plat_time_us();
         if (now - last_stat >= 1000000) {
             fps_now = shown_this_sec;
             shown_this_sec = 0;
             last_stat = now;
-            int secs = (int)(clock - first_pts);
+            int secs = (int)(clock - origin);
             snprintf(stat_line, sizeof(stat_line),
                      " %02d:%02d:%02d  %d fps  dropped %d  convert %.1f ms  a/v %+.0f ms ",
                      secs / 3600, secs / 60 % 60, secs % 60, fps_now, st.frames_dropped,
                      conv_ms, last_diff * 1000.0);
         }
-        osd_text(fb, W, H, 24, 16, stat_line, 0xFFFFFFFFu, 0xFF000000u);
+        if (show_stats)
+            osd_text(fb, W, H, W / 20, H / 20, stat_line, 0xFFFFFFFFu, 0xFF000000u);
+        if (now < bar_until) {
+            draw_progress(fb, W, H, (seeking ? seek_goal : clock) - origin, duration);
+            bar_on = 1;
+        }
 
         plat_flip();
-        st.seconds_played = clock - first_pts;
+        st.seconds_played = clock - origin;
     }
 
     /* --- shutdown --- */

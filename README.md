@@ -7,7 +7,7 @@ It is homebrew for consoles that can run fake-signed packages (for example
 with GoldHEN). *Mozi* is Hungarian for cinema; *Orbis* is the PS4's codename.
 
 > **Status: early.** Playback works and stays in sync. There is a plain file
-> list, pause and stop; seeking, audio track choice and subtitles are missing.
+> list, pause, stop and seeking; audio track choice and subtitles are missing.
 
 ## What works
 
@@ -34,10 +34,8 @@ Tested on a PS4 Pro:
 
 ## Not there yet
 
-- Seeking
 - Choosing the audio track (the file's default track is used)
 - Subtitles
-- A way to hide the diagnostic line at the top of the picture
 - A designed interface (the list is plain text for now)
 - Entering a share on the console (it is a text file for now)
 
@@ -70,19 +68,23 @@ the thing to look at (or attach to a bug report) when something does not work.
 
 | Button | In the list | While playing |
 |---|---|---|
-| D-pad up/down | move | |
-| L1 / R1, D-pad left/right | page up / down | |
+| D-pad up/down | move | 1 minute forward / back |
+| D-pad left/right | page up / down | 10 seconds back / forward |
+| L1 / R1 | page up / down | 10 minutes back / forward |
 | Cross | open folder / play | pause, continue |
 | Circle | back | stop, return to the list |
+| Triangle | | show / hide the diagnostics line |
 | PS | | quit |
+
+Jumps land on the nearest key frame, so the distance is approximate.
 
 **Why not a USB drive?** A PS4 application runs in a sandbox that does not
 contain the USB mount points, so the player cannot see them. `/data` is
 visible, which is why videos go there.
 
-The line at the top of the picture shows the position, frames per second,
+The diagnostics line (triangle) shows the position, frames per second,
 dropped frames, the time spent converting each frame, and the offset between
-picture and sound. It is there for testing and will become optional.
+picture and sound.
 
 ## Building
 
@@ -191,7 +193,7 @@ It prints the same log as the console build, ending with a summary line
 | `PLAYER_WAV=file.wav` | writes the audio that would have been played |
 | `PLAYER_DUMP_EVERY=n` | write every nth frame instead |
 | `PLAYER_SIZE=1920x1080` | size of the fake screen at start |
-| `PLAYER_KEYS="d x 5000 o"` | scripted button presses: `u d l r` d-pad, `x o` buttons, a number waits that many ms |
+| `PLAYER_KEYS="d x 5000 o"` | scripted button presses: `u d l r` d-pad, `x o t` buttons, `L R` L1/R1, a number waits that many ms |
 | `MOZI_LOCAL=dir` | folder shown as the console's video folder |
 | `MOZI_SHARES=file` | shares file to read instead of `/data/orbismozi/shares.txt` |
 
