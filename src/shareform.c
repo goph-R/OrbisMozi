@@ -3,16 +3,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "backdrop.h"
 #include "osd.h"
 #include "plat.h"
 #include "shareform.h"
 #include "smb.h"
 #include "textinput.h"
 
-#define COL_BG      0xFF101428u
 #define COL_TEXT    0xFFE8E8F0u
-#define COL_DIM     0xFF8890A8u
-#define COL_SEL_BG  0xFF2F5FD0u
+#define COL_DIM     0xFFB4C2E4u
+#define COL_SEL_BG  0xFF3D7BFFu
 #define COL_OK      0xFF80E090u
 #define COL_ERROR   0xFFFF8080u
 
@@ -63,15 +63,16 @@ static void draw(void)
     int value_x = mx + 14 * fw;
     int max_chars = (W - mx - value_x) / fw - 2;
 
-    osd_fill(fb, W, H, 0, 0, W, H, COL_BG);
-    osd_text(fb, W, H, mx, my, "Orbis Mozi", COL_TEXT, COL_BG);
+    backdrop_draw(fb, W, H);
+    backdrop_shade(fb, W, H, mx - 16, y0 - 10, W - 2 * mx + 32, (row_count() + 4) * row_h + 20);
+    osd_text(fb, W, H, mx, my, "Orbis Mozi", COL_TEXT, 0);
     osd_text(fb, W, H, mx, my + fh + 4, F.is_new ? "Add a network share" : "Change a network share",
-             COL_DIM, COL_BG);
+             COL_DIM, 0);
 
     for (int i = 0; i < row_count(); i++) {
         int y = y0 + i * row_h + (i >= N_FIELDS ? row_h / 2 : 0);
         int sel = i == F.sel;
-        uint32_t bg = sel ? COL_SEL_BG : COL_BG;
+        uint32_t bg = sel ? COL_SEL_BG : 0;
 
         if (sel)
             osd_fill(fb, W, H, mx, y, W - 2 * mx, row_h, bg);
@@ -99,14 +100,14 @@ static void draw(void)
 
     int msg_y = y0 + (row_count() + 2) * row_h;
     if (F.busy)
-        osd_text(fb, W, H, mx + fw, msg_y, F.busy, COL_DIM, COL_BG);
+        osd_text(fb, W, H, mx + fw, msg_y, F.busy, COL_DIM, 0);
     else if (F.message[0])
-        osd_text(fb, W, H, mx + fw, msg_y, F.message, F.message_colour, COL_BG);
+        osd_text(fb, W, H, mx + fw, msg_y, F.message, F.message_colour, 0);
 
     if (F.sel < N_FIELDS)
-        osd_text(fb, W, H, mx, H - my - 2 * fh - 4, g_fields[F.sel].hint, COL_DIM, COL_BG);
+        osd_text(fb, W, H, mx, H - my - 2 * fh - 4, g_fields[F.sel].hint, COL_DIM, 0);
     osd_text(fb, W, H, mx, H - my - fh, F.sel < N_FIELDS ? "X edit    O cancel" : "X choose    O cancel",
-             COL_DIM, COL_BG);
+             COL_DIM, 0);
     plat_flip();
 }
 

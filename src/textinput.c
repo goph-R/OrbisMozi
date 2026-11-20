@@ -1,14 +1,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "backdrop.h"
 #include "osd.h"
 #include "plat.h"
 #include "textinput.h"
 
-#define COL_BG      0xFF101428u
 #define COL_TEXT    0xFFE8E8F0u
-#define COL_DIM     0xFF8890A8u
-#define COL_SEL_BG  0xFF2F5FD0u
+#define COL_DIM     0xFFB4C2E4u
+#define COL_SEL_BG  0xFF3D7BFFu
 #define COL_FIELD   0xFF202848u
 
 /* The built-in keyboard: printable ASCII, laid out in rows. */
@@ -48,8 +48,9 @@ static int builtin_keyboard(const char *title, char *buf, int buf_size, int pass
         int grid_x = mx, grid_y = my + 6 * fh;
         char shown[300];
 
-        osd_fill(fb, W, H, 0, 0, W, H, COL_BG);
-        osd_text(fb, W, H, mx, my, title, COL_TEXT, COL_BG);
+        backdrop_draw(fb, W, H);
+        backdrop_shade(fb, W, H, grid_x - 16, grid_y - 10, 13 * cell_w + 28, N_ROWS * cell_h + 16);
+        osd_text(fb, W, H, mx, my, title, COL_TEXT, 0);
 
         /* The text so far, with a cursor. */
         size_t len = strlen(text);
@@ -70,7 +71,7 @@ static int builtin_keyboard(const char *title, char *buf, int buf_size, int pass
                 char ch = g_rows[r][c];
                 char label[4] = { ch, 0, 0, 0 };
                 int sel = r == row && c == col;
-                uint32_t bg = sel ? COL_SEL_BG : COL_BG;
+                uint32_t bg = sel ? COL_SEL_BG : 0;
                 int x = grid_x + c * cell_w, y = grid_y + r * cell_h;
 
                 if (shift && ch >= 'a' && ch <= 'z')
@@ -85,8 +86,8 @@ static int builtin_keyboard(const char *title, char *buf, int buf_size, int pass
         }
 
         osd_text(fb, W, H, mx, H - my - 2 * fh - 4,
-                 "X type    Square delete    Triangle upper/lower case", COL_DIM, COL_BG);
-        osd_text(fb, W, H, mx, H - my - fh, "OPTIONS or R1 done    O cancel", COL_DIM, COL_BG);
+                 "X type    Square delete    Triangle upper/lower case", COL_DIM, 0);
+        osd_text(fb, W, H, mx, H - my - fh, "OPTIONS or R1 done    O cancel", COL_DIM, 0);
         plat_flip();
 
         unsigned pad = plat_pad();

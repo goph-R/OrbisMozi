@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 
 #include "browser.h"
+#include "backdrop.h"
 #include "osd.h"
 #include "plat.h"
 #include "shareform.h"
@@ -18,11 +19,10 @@
 #define MAX_DEPTH   64
 #define PATH_MAX_   1200
 
-#define COL_BG      0xFF101428u
 #define COL_TEXT    0xFFE8E8F0u
-#define COL_DIM     0xFF8890A8u
+#define COL_DIM     0xFFB4C2E4u
 #define COL_FOLDER  0xFFFFD27Fu
-#define COL_SEL_BG  0xFF2F5FD0u
+#define COL_SEL_BG  0xFF3D7BFFu
 #define COL_ERROR   0xFFFF8080u
 
 typedef struct {
@@ -86,16 +86,6 @@ static void read_roots(void)
 
     B.n_roots = 0;
     snprintf(B.roots[B.n_roots++], PATH_MAX_, "%s", local_root());
-
-    DIR *d = opendir("/app0/assets/videos");        /* clips packed into the package */
-    if (d) {
-        for (struct dirent *e; (e = readdir(d)) != NULL; )
-            if (is_video(e->d_name)) {
-                snprintf(B.roots[B.n_roots++], PATH_MAX_, "/app0/assets/videos");
-                break;
-            }
-        closedir(d);
-    }
 
     f = fopen(shares_file(), "r");
     if (!f)
@@ -278,8 +268,6 @@ static void label_of(int i, char *out, size_t out_size, int *is_dir)
         snprintf(out, out_size, "Add network share...");
     } else if (smb_is_url(B.roots[i])) {
         smb_display_name(B.roots[i], out, out_size);
-    } else if (strcmp(B.roots[i], "/app0/assets/videos") == 0) {
-        snprintf(out, out_size, "Test clips inside the package");
     } else {
         snprintf(out, out_size, "This console  (%s)", B.roots[i]);
     }
@@ -298,9 +286,10 @@ static void draw(const char *busy)
     char text[1300], line[1300];
     int n = count();
 
-    osd_fill(fb, W, H, 0, 0, W, H, COL_BG);
+    backdrop_draw(fb, W, H);
+    backdrop_shade(fb, W, H, margin_x - 16, list_y - 10, W - 2 * margin_x + 32, rows * row_h + 20);
 
-    osd_text(fb, W, H, margin_x, margin_y, "Orbis Mozi", COL_TEXT, COL_BG);
+    osd_text(fb, W, H, margin_x, margin_y, "Orbis Mozi", COL_TEXT, 0);
     if (B.cur[0]) {
         if (smb_is_url(B.cur))
             smb_display_name(B.cur, text, sizeof(text));
@@ -310,7 +299,7 @@ static void draw(const char *busy)
         snprintf(text, sizeof(text), "Choose where to look for videos");
     }
     shorten(line, sizeof(line), text, cols);
-    osd_text(fb, W, H, margin_x, margin_y + fh + 4, line, COL_DIM, COL_BG);
+    osd_text(fb, W, H, margin_x, margin_y + fh + 4, line, COL_DIM, 0);
 
     /* Keep the selection inside the visible part of the list. */
     if (B.sel < B.top)
@@ -322,7 +311,7 @@ static void draw(const char *busy)
 
     for (int i = B.top; i < n && i < B.top + rows; i++) {
         int y = list_y + (i - B.top) * row_h, is_dir;
-        uint32_t bg = i == B.sel ? COL_SEL_BG : COL_BG;
+        uint32_t bg = i == B.sel ? COL_SEL_BG : 0;
 
         label_of(i, text, sizeof(text), &is_dir);
         if (i == B.sel)
@@ -335,12 +324,12 @@ static void draw(const char *busy)
     }
 
     if (busy) {
-        osd_text(fb, W, H, margin_x + fw, list_y + 4, busy, COL_DIM, COL_BG);
+        osd_text(fb, W, H, margin_x + fw, list_y + 4, busy, COL_DIM, 0);
     } else if (B.message[0]) {
         shorten(line, sizeof(line), B.message, cols);
-        osd_text(fb, W, H, margin_x + fw, list_y + 4, line, COL_ERROR, COL_BG);
+        osd_text(fb, W, H, margin_x + fw, list_y + 4, line, COL_ERROR, 0);
     } else if (n == 0) {
-        osd_text(fb, W, H, margin_x + fw, list_y + 4, "No videos or folders here.", COL_DIM, COL_BG);
+        osd_text(fb, W, H, margin_x + fw, list_y + 4, "No videos or folders here.", COL_DIM, 0);
     }
 
     int foot_y = H - margin_y - fh;
@@ -348,10 +337,10 @@ static void draw(const char *busy)
         snprintf(text, sizeof(text), "%d / %d", B.sel + 1, n);
     else
         text[0] = '\0';
-    osd_text(fb, W, H, W - margin_x - (int)strlen(text) * fw, foot_y, text, COL_DIM, COL_BG);
+    osd_text(fb, W, H, W - margin_x - (int)strlen(text) * fw, foot_y, text, COL_DIM, 0);
     osd_text(fb, W, H, margin_x, foot_y,
              B.cur[0] ? "X open    O back    L1/R1 page up/down" : "X open    Square change or delete a share",
-             COL_DIM, COL_BG);
+             COL_DIM, 0);
 
     plat_flip();
 }

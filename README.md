@@ -194,10 +194,6 @@ Three system files every package needs (`right.sprx`, `libc.prx`,
 `libSceFios2.prx`) are copied from the toolchain's samples during the build;
 they are not part of this repository.
 
-Any video placed in `assets/videos/` is packed into the package and shows up
-in the list as "Test clips inside the package". That gives a self-contained
-test package.
-
 ## Testing on the PC
 
 The player core does not depend on the console. `make host` builds it against

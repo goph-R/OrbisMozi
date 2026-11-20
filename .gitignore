@@ -9,6 +9,3 @@ sce_sys/param.sfo
 sce_sys/about/
 sce_module/
 
-# Test videos packed into the package are personal, never commit them
-assets/videos/*
-!assets/videos/.gitkeep

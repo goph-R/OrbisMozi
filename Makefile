@@ -45,16 +45,12 @@ OBJS        := $(patsubst src/%.c,$(BUILD)/%.o,$(SRCS))
 SAMPLE      := $(TOOLCHAIN)/samples/hello_world
 SYSFILES    := sce_sys/about/right.sprx sce_module/libc.prx sce_module/libSceFios2.prx
 
-# Optional: videos placed in assets/videos/ are packed into the .pkg and
-# played if nothing is found in /data/video (handy for a self-contained test).
-ASSETS      := $(wildcard assets/videos/*.*)
-
 all: $(CONTENT_ID).pkg
 
 $(CONTENT_ID).pkg: pkg.gp4
 	$(PKGTOOL) pkg_build $< .
 
-pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png $(SYSFILES) $(ASSETS)
+pkg.gp4: eboot.bin sce_sys/param.sfo sce_sys/icon0.png $(SYSFILES)
 	$(TOOLS)/create-gp4 -out $@ --content-id=$(CONTENT_ID) --files "$^"
 
 $(SYSFILES): %: $(SAMPLE)/%
@@ -85,7 +81,7 @@ $(BUILD):
 	mkdir -p $@
 
 # PC test build: same player core, fake display and audio device.
-HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c src/textinput.c src/shareform.c src/subfont.c host/plat_host.c
+HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c src/textinput.c src/shareform.c src/subfont.c src/backdrop.c host/plat_host.c
 host: $(BUILD)/player_host
 $(BUILD)/player_host: $(HOST_SRCS) $(wildcard src/*.h) src/subfont.bin | $(BUILD)
 	clang -O2 -g -Wall -Wextra -I$(FFMPEG_HOST)/include -I$(SMB2_HOST)/include -o $@ $(HOST_SRCS) \

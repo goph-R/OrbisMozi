@@ -84,8 +84,12 @@ int osd_text(uint32_t *fb, int fb_w, int fb_h, int x, int y,
             for (int row = 0; row < FONT_H; row++) {
                 uint32_t *dst = fb + (size_t)(y + row) * fb_w + x;
                 unsigned bits = glyph[row];
-                for (int col = 0; col < FONT_W; col++)
-                    dst[col] = (bits & (0x8000u >> col)) ? fg : bg;
+                for (int col = 0; col < FONT_W; col++) {
+                    if (bits & (0x8000u >> col))
+                        dst[col] = fg;
+                    else if (bg >> 24)              /* bg 0 = leave what is there */
+                        dst[col] = bg;
+                }
             }
         }
         x += FONT_W;
