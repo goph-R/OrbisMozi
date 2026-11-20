@@ -10,7 +10,8 @@ something can be seen on the TV.
 |---|---|
 | Canvas size | 1920x1080, with a safe margin of 96 px left/right and 54 px top/bottom |
 | List or tiles | A list. Tiles need thumbnails, and the player has none |
-| UI font | One family, two weights, with Hungarian accents (ő, ű) and a licence that allows redistribution, for example Inter, Noto Sans or Source Sans |
+| UI font | **Decided: Noto Sans**, in several sizes (SIL Open Font License, has the Hungarian accents ő, ű). Still open: which weights and which pixel sizes |
+| Line width | **Decided: 2 px** in the 1080p mockup (drawn as a crisp 1 px line in the 720p menu). Small gaps, paddings and radii in multiples of 3 |
 | Palette | 5–6 colours: background, panel, text, dimmed text, accent (selection), error |
 | Button hints | Own drawn ✕ ○ □ △ shapes rather than text like "X open" |
 
