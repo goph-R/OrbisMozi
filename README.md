@@ -67,8 +67,8 @@ the thing to look at (or attach to a bug report) when something does not work.
 
 | Button | In the list | While playing |
 |---|---|---|
-| D-pad up/down | move | 1 minute forward / back |
-| D-pad left/right | page up / down | 10 seconds back / forward |
+| D-pad up/down | move | volume up / down (0–200%) |
+| D-pad left/right | page up / down | 10 seconds back / forward (hold to keep going) |
 | L1 / R1 | page up / down | 10 minutes back / forward |
 | Cross | open folder / play | pause, continue |
 | Square | change or delete a share | next audio track |
