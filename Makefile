@@ -18,6 +18,8 @@ TOOLCHAIN   := $(OO_PS4_TOOLCHAIN)
 export OO_PS4_TOOLCHAIN
 FFMPEG      ?= $(PS4TC)/ffmpeg-ps4
 FFMPEG_HOST ?= $(PS4TC)/ffmpeg-host
+SMB2        ?= $(PS4TC)/libsmb2-ps4
+SMB2_HOST   ?= $(PS4TC)/libsmb2-host
 LD          := $(or $(shell command -v ld.lld),$(PS4TC)/lld/usr/lib/llvm-18/bin/ld.lld)
 CC          := clang
 TOOLS       := $(TOOLCHAIN)/bin/linux
@@ -28,11 +30,11 @@ SSL11       ?= $(PS4TC)/libssl11/usr/lib/x86_64-linux-gnu
 PKGTOOL     := DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 LD_LIBRARY_PATH=$(SSL11) $(TOOLS)/PkgTool.Core
 
 FFLIBS      := -lavformat -lavcodec -lswscale -lswresample -lavutil
-LIBS        := $(FFLIBS) -lm -lc -lkernel -lSceVideoOut -lSceAudioOut -lSceUserService
+LIBS        := $(FFLIBS) -lsmb2 -lm -lc -lkernel -lSceVideoOut -lSceAudioOut -lSceUserService -lScePad -lSceNet
 CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -march=btver2 \
-               -Wall -Wextra -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -I$(FFMPEG)/include
+               -Wall -Wextra -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -I$(FFMPEG)/include -I$(SMB2)/include
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
-               --wrap=pthread_create -L$(FFMPEG)/lib -L$(TOOLCHAIN)/lib $(LIBS) $(TOOLCHAIN)/lib/crt1.o
+               --wrap=pthread_create --wrap=fcntl -L$(FFMPEG)/lib -L$(SMB2)/lib -L$(TOOLCHAIN)/lib $(LIBS) $(TOOLCHAIN)/lib/crt1.o
 
 BUILD       := build
 SRCS        := $(wildcard src/*.c)
@@ -83,11 +85,11 @@ $(BUILD):
 	mkdir -p $@
 
 # PC test build: same player core, fake display and audio device.
-HOST_SRCS := src/main.c src/player.c src/osd.c host/plat_host.c
+HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c host/plat_host.c
 host: $(BUILD)/player_host
 $(BUILD)/player_host: $(HOST_SRCS) $(wildcard src/*.h) | $(BUILD)
-	clang -O2 -g -Wall -Wextra -I$(FFMPEG_HOST)/include -o $@ $(HOST_SRCS) \
-	      -L$(FFMPEG_HOST)/lib $(FFLIBS) -lm -lpthread
+	clang -O2 -g -Wall -Wextra -I$(FFMPEG_HOST)/include -I$(SMB2_HOST)/include -o $@ $(HOST_SRCS) \
+	      -L$(FFMPEG_HOST)/lib -L$(SMB2_HOST)/lib $(FFLIBS) -lsmb2 -lm -lpthread
 
 clean:
 	rm -rf $(BUILD) *.pkg pkg.gp4 eboot.bin sce_sys/param.sfo

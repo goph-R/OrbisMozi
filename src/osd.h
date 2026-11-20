@@ -7,11 +7,22 @@
 /* Adds a line to the log (printf style). Also goes to stdout. Thread safe. */
 void osd_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/* Also writes every log line to this file (emptied first). The file can be
+ * fetched from the console afterwards, which helps when the screen is frozen. */
+void osd_log_to_file(const char *path);
+
 /* Draws the log full-screen into the back buffer and flips. Main thread only. */
 void osd_show_log(void);
 
-/* Draws one line of text with a solid background box. */
-void osd_text(uint32_t *fb, int fb_w, int fb_h, int x, int y,
+/* Draws one line of UTF-8 text with a solid background box. Returns the x
+ * position after the last character. Accents are dropped (ASCII-only font). */
+int  osd_text(uint32_t *fb, int fb_w, int fb_h, int x, int y,
               const char *text, uint32_t fg, uint32_t bg);
+
+int  osd_font_width(void);
+int  osd_font_height(void);
+
+/* Copies the newest log line (empty string if there is none). */
+void osd_last_line(char *out, int out_size);
 
 #endif

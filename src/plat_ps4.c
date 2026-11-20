@@ -1,11 +1,16 @@
 /* PS4 back end: sceVideoOut frame buffers and sceAudioOut. */
+#include <fcntl.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 
 #include <orbis/libkernel.h>
 #include <orbis/VideoOut.h>
 #include <orbis/AudioOut.h>
+#include <orbis/Pad.h>
 #include <orbis/UserService.h>
 
 #include "osd.h"
@@ -15,7 +20,7 @@
 #define BUFFER_STRIDE 0x800000          /* 8 MB each: enough for 1920x1080x4 */
 #define VIDEO_MEM     (BUFFER_STRIDE * NUM_BUFFERS)
 
-static int               g_video, g_audio = -1;
+static int               g_video, g_audio = -1, g_pad = -1;
 static int               g_w, g_h;
 static OrbisKernelEqueue g_flip_queue;
 static void             *g_buffers[NUM_BUFFERS];
@@ -39,6 +44,35 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(
     pthread_attr_setstacksize(&own, 2 * 1024 * 1024);
     rc = __real_pthread_create(thread, &own, fn, arg);
     pthread_attr_destroy(&own);
+    return rc;
+}
+
+/* fcntl(F_SETFL, O_NONBLOCK) is refused for sockets on the console (EACCES),
+ * which would leave libsmb2 with a blocking socket and hang it. Do the same
+ * through the socket option the PS4 has for it, or FIONBIO as a last resort.
+ * (The linker redirects fcntl here via --wrap.) */
+#define PS4_SO_NBIO     0x1200
+#define FREEBSD_FIONBIO 0x8004667eUL
+
+int __real_fcntl(int fd, int cmd, ...);
+
+int __wrap_fcntl(int fd, int cmd, ...)
+{
+    va_list ap;
+    unsigned long arg;
+
+    va_start(ap, cmd);
+    arg = va_arg(ap, unsigned long);
+    va_end(ap);
+
+    int rc = __real_fcntl(fd, cmd, arg);
+    if (rc < 0 && cmd == F_SETFL) {
+        int on = (arg & O_NONBLOCK) != 0;
+        if (setsockopt(fd, SOL_SOCKET, PS4_SO_NBIO, &on, sizeof(on)) == 0)
+            return 0;
+        if (ioctl(fd, FREEBSD_FIONBIO, &on) == 0)
+            return 0;
+    }
     return rc;
 }
 
@@ -95,7 +129,15 @@ int plat_init(void)
     void *mem = NULL;
     int rc;
 
+    int user = 0;
+
     sceUserServiceInitialize(NULL);
+
+    /* Controller of the user who started the application. */
+    if (scePadInit() == 0 && sceUserServiceGetInitialUser(&user) == 0)
+        g_pad = scePadOpen(user, 0, 0, NULL);
+    if (g_pad < 0)
+        osd_log("cannot open the controller (0x%08X)", (unsigned)g_pad);
 
     g_video = sceVideoOutOpen(ORBIS_VIDEO_USER_MAIN, ORBIS_VIDEO_OUT_BUS_MAIN, 0, 0);
     if (g_video < 0)
@@ -170,6 +212,27 @@ void plat_audio_write(const int16_t *pcm)
 {
     if (g_audio <= 0 || sceAudioOutOutput(g_audio, pcm) < 0)
         sceKernelUsleep((unsigned)((uint64_t)AUDIO_GRAIN * 1000000 / AUDIO_RATE));   /* keep real-time pace */
+}
+
+unsigned plat_pad(void)
+{
+    static const struct { unsigned sce, own; } map[] = {
+        { ORBIS_PAD_BUTTON_UP, PAD_UP },             { ORBIS_PAD_BUTTON_DOWN, PAD_DOWN },
+        { ORBIS_PAD_BUTTON_LEFT, PAD_LEFT },         { ORBIS_PAD_BUTTON_RIGHT, PAD_RIGHT },
+        { ORBIS_PAD_BUTTON_CROSS, PAD_CROSS },       { ORBIS_PAD_BUTTON_CIRCLE, PAD_CIRCLE },
+        { ORBIS_PAD_BUTTON_TRIANGLE, PAD_TRIANGLE }, { ORBIS_PAD_BUTTON_SQUARE, PAD_SQUARE },
+        { ORBIS_PAD_BUTTON_L1, PAD_L1 },             { ORBIS_PAD_BUTTON_R1, PAD_R1 },
+        { ORBIS_PAD_BUTTON_OPTIONS, PAD_OPTIONS },
+    };
+    OrbisPadData data;
+    unsigned out = 0;
+
+    if (g_pad < 0 || scePadReadState(g_pad, &data) != 0 || !data.connected)
+        return 0;
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+        if (data.buttons & map[i].sce)
+            out |= map[i].own;
+    return out;
 }
 
 uint64_t plat_time_us(void)

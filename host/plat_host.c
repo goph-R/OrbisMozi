@@ -4,7 +4,11 @@
  * Environment:
  *   PLAYER_DUMP_DIR   write every 240th shown frame there as PPM
  *   PLAYER_WAV        write all audio to this WAV file
- *   PLAYER_SIZE       WxH of the fake screen (default 1280x720) */
+ *   PLAYER_SIZE       WxH of the fake screen (default 1280x720)
+ *   PLAYER_KEYS       scripted controller, e.g. "d d x 5000 o": u d l r = d-pad,
+ *                     x o t s = buttons, a number = wait that many milliseconds.
+ *                     Each press takes 300 ms. The program exits when the script ends.
+ *   PLAYER_DUMP_EVERY write every Nth frame instead of every 240th */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,7 +95,11 @@ void plat_flip(void)
 {
     const char *dir = getenv("PLAYER_DUMP_DIR");
 
-    if (dir && g_flips % 240 == 120) {
+    int every = getenv("PLAYER_DUMP_EVERY") ? atoi(getenv("PLAYER_DUMP_EVERY")) : 240;
+    if (every < 1)
+        every = 1;
+
+    if (dir && g_flips % every == every / 2) {
         char name[512];
         snprintf(name, sizeof(name), "%s/frame_%05ld.ppm", dir, g_flips);
         FILE *f = fopen(name, "wb");
@@ -115,6 +123,50 @@ void plat_flip(void)
     g_back ^= 1;
 }
 
+/* Plays back the PLAYER_KEYS script against the clock. */
+unsigned plat_pad(void)
+{
+    static uint64_t start;
+    const char *script = getenv("PLAYER_KEYS");
+    uint64_t now = plat_time_us(), t = 0;
+
+    if (!script)
+        return 0;
+    if (!start)
+        start = now;
+    now = (now - start) / 1000;                     /* ms since the first call */
+
+    for (const char *p = script; *p; ) {
+        while (*p == ' ')
+            p++;
+        if (!*p)
+            break;
+        if (*p >= '0' && *p <= '9') {
+            t += strtoul(p, (char **)&p, 10);
+            if (now < t)
+                return 0;
+            continue;
+        }
+        unsigned button = 0;
+        switch (*p++) {
+        case 'u': button = PAD_UP; break;
+        case 'd': button = PAD_DOWN; break;
+        case 'l': button = PAD_LEFT; break;
+        case 'r': button = PAD_RIGHT; break;
+        case 'x': button = PAD_CROSS; break;
+        case 'o': button = PAD_CIRCLE; break;
+        case 't': button = PAD_TRIANGLE; break;
+        case 's': button = PAD_SQUARE; break;
+        }
+        if (now < t + 100)
+            return button;
+        t += 300;
+        if (now < t)
+            return 0;
+    }
+    exit(0);                                        /* script finished */
+}
+
 void plat_audio_write(const int16_t *pcm)
 {
     if (g_wav)
@@ -127,6 +179,10 @@ void plat_audio_write(const int16_t *pcm)
     g_audio_frames += AUDIO_GRAIN;
 
     uint64_t played_until = g_audio_start + g_audio_frames * 1000000u / AUDIO_RATE;
+    if (played_until < now) {                       /* ran dry (pause): a device does not catch up */
+        g_audio_start += now - played_until;
+        played_until = now;
+    }
     uint64_t slack = 2u * AUDIO_GRAIN * 1000000u / AUDIO_RATE;
     if (played_until > now + slack)
         usleep((useconds_t)(played_until - now - slack));

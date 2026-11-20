@@ -1,100 +1,73 @@
-/* Start-up: find a video file, play it, report on screen. */
-#include <dirent.h>
+/* Start-up and the main loop: pick a video in the list, play it, repeat. */
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/stat.h>
 
+#include "browser.h"
 #include "osd.h"
 #include "plat.h"
 #include "player.h"
+#include "smb.h"
 
-/* Searched in this order; the first video found is played. */
-static const char *g_dirs[] = {
-    "/mnt/usb0", "/mnt/usb1", "/usb0", "/usb1",
-    "/data/video", "/app0/assets/videos",
-};
+#define CONFIG_DIR   "/data/orbismozi"
+#define SHARES_FILE  CONFIG_DIR "/shares.txt"
 
-static int is_video(const char *name)
+/* Creates our folders and, the first time, an example shares file that the
+ * user can fetch over FTP, edit and put back. */
+static void prepare_folders(void)
 {
-    static const char *exts[] = { ".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts", ".webm", ".mpg", ".wmv", ".flv" };
-    const char *dot = strrchr(name, '.');
-    if (!dot || name[0] == '.')
-        return 0;
-    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
-        if (strcasecmp(dot, exts[i]) == 0)
-            return 1;
-    return 0;
+    static const char example[] =
+        "# Orbis Mozi - network shares\n"
+        "#\n"
+        "# One share per line. SMB2 or SMB3 is needed (not the old SMB1).\n"
+        "# Lines starting with # are ignored.\n"
+        "#\n"
+        "#   smb://user:password@192.168.1.10/share\n"
+        "#   smb://192.168.1.10/public/films          (guest access, starts in a folder)\n";
+    FILE *f;
+
+    if (mkdir("/data/video", 0777) != 0 && errno != EEXIST)
+        osd_log("cannot create /data/video (%s)", strerror(errno));
+    if (mkdir(CONFIG_DIR, 0777) != 0 && errno != EEXIST)
+        osd_log("cannot create " CONFIG_DIR " (%s)", strerror(errno));
+
+    if ((f = fopen(SHARES_FILE, "r")) != NULL) {
+        fclose(f);
+    } else if ((f = fopen(SHARES_FILE, "w")) != NULL) {
+        fwrite(example, 1, sizeof(example) - 1, f);
+        fclose(f);
+    }
 }
 
-/* Finds the alphabetically first video in dir. Returns 1 if found. */
-static int find_in_dir(const char *dir, char *out, size_t out_size)
+/* Shows the log until cross or circle is pressed. */
+static void show_log_until_button(void)
 {
-    char best[512] = "";
-    int entries = 0;
-    DIR *d = opendir(dir);
+    unsigned prev = plat_pad();
 
-    if (!d) {
-        osd_log("  %-20s not accessible (%s)", dir, strerror(errno));
-        return 0;
-    }
-    for (struct dirent *e; (e = readdir(d)) != NULL; ) {
-        entries++;
-        if (is_video(e->d_name) && (!best[0] || strcasecmp(e->d_name, best) < 0))
-            snprintf(best, sizeof(best), "%s", e->d_name);
-    }
-    closedir(d);
-
-    if (!best[0]) {
-        osd_log("  %-20s %d entries, no video", dir, entries);
-        return 0;
-    }
-    osd_log("  %-20s %d entries, found %s", dir, entries, best);
-    snprintf(out, out_size, "%s/%s", dir, best);
-    return 1;
-}
-
-/* Logs the names in a directory on one line, to show what the app can see. */
-static void list_dir(const char *dir)
-{
-    char line[140];
-    int len, entries = 0;
-    DIR *d = opendir(dir);
-
-    if (!d) {
-        osd_log("  %s: not accessible (%s)", dir, strerror(errno));
-        return;
-    }
-    len = snprintf(line, sizeof(line), "  %s:", dir);
-    for (struct dirent *e; (e = readdir(d)) != NULL; ) {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
-            continue;
-        entries++;
-        if (len + (int)strlen(e->d_name) + 2 < (int)sizeof(line))
-            len += snprintf(line + len, sizeof(line) - len, " %s", e->d_name);
-    }
-    closedir(d);
-    if (entries == 0)
-        snprintf(line + len, sizeof(line) - len, " (empty)");
-    osd_log("%s", line);
-}
-
-static void hold_log(unsigned seconds)
-{
-    for (unsigned i = 0; i < seconds * 10; i++) {
+    osd_log("press X to go back");
+    for (;;) {
         osd_show_log();
-        plat_sleep_us(100000);
+        unsigned pad = plat_pad();
+        if ((pad & ~prev) & (PAD_CROSS | PAD_CIRCLE))
+            return;
+        prev = pad;
     }
+}
+
+static void report(int rc, const PlayerStats *stats)
+{
+    osd_log(rc == 0 ? "playback finished" : "playback failed");
+    osd_log("played %.1f s, %d frames shown, %d dropped, convert %.1f ms/frame, worst a/v offset %.0f ms",
+            stats->seconds_played, stats->frames_shown, stats->frames_dropped,
+            stats->avg_convert_ms, stats->max_abs_av_diff_ms);
 }
 
 int main(int argc, char **argv)
 {
-    char path[1024] = "";
+    char path[1500] = "";
     PlayerStats stats;
-    double max_seconds = 0;
-    int found = 0;
 
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -103,42 +76,28 @@ int main(int argc, char **argv)
         for (;;)
             plat_sleep_us(1000000);
     }
-    osd_log("Orbis Mozi test build - screen %dx%d", plat_width(), plat_height());
+    osd_log("Orbis Mozi - screen %dx%d", plat_width(), plat_height());
 
-    if (argc > 1) {                                 /* PC test: file on the command line */
-        snprintf(path, sizeof(path), "%s", argv[1]);
-        if (argc > 2)
-            max_seconds = atof(argv[2]);
-        found = 1;
-    } else {
-        /* Our own folder on the console's disk; files can be put there over FTP. */
-        if (mkdir("/data/video", 0777) != 0 && errno != EEXIST)
-            osd_log("cannot create /data/video (%s)", strerror(errno));
-        osd_log("folders this app can see:");
-        list_dir("/");
-        list_dir("/data");
-        osd_log("looking for a video file:");
-        for (size_t i = 0; i < sizeof(g_dirs) / sizeof(g_dirs[0]) && !found; i++)
-            found = find_in_dir(g_dirs[i], path, sizeof(path));
-    }
-
-    if (!found) {
-        osd_log("no video file found - nothing to play");
-    } else {
+    if (argc > 1) {                                 /* PC test: play one file and exit */
+        smb_display_name(argv[1], path, sizeof(path));     /* keeps a password out of the log */
         osd_log("playing %s", path);
-        if (argc <= 1)
-            hold_log(8);                           /* time to read the log */
-
-        int rc = player_run(path, max_seconds, &stats);
-        osd_log(rc == 0 ? "playback finished" : "playback failed");
-        osd_log("played %.1f s, %d frames shown, %d dropped, convert %.1f ms/frame, worst a/v offset %.0f ms",
-                stats.seconds_played, stats.frames_shown, stats.frames_dropped,
-                stats.avg_convert_ms, stats.max_abs_av_diff_ms);
+        int rc = player_run(argv[1], argc > 2 ? atof(argv[2]) : 0, &stats);
+        report(rc, &stats);
+        return rc == 0 ? 0 : 1;
     }
 
-    if (argc > 1)
-        return 0;
+    if (!getenv("MOZI_LOCAL")) {                    /* set only when testing on a PC */
+        prepare_folders();
+        osd_log_to_file(CONFIG_DIR "/log.txt");
+    }
 
-    for (;;)                                        /* keep the result on screen */
-        hold_log(1);
+    for (;;) {
+        browser_pick(path, sizeof(path));
+        osd_log("playing %s", smb_is_url(path) ? "from a network share" : path);
+
+        int rc = player_run(path, 0, &stats);
+        report(rc, &stats);
+        if (rc != 0)
+            show_log_until_button();                /* otherwise the reason would be lost */
+    }
 }

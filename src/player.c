@@ -23,6 +23,7 @@
 #include "osd.h"
 #include "plat.h"
 #include "player.h"
+#include "smb.h"
 
 #define PKTQ_CAP        2048
 #define PKTQ_ENOUGH     48                  /* packets per stream considered "full" */
@@ -32,6 +33,7 @@
 #define VIDEO_THREADS_HD 6                  /* for sources above 720p */
 #define AUDIO_LATENCY   0.040               /* device + mixer delay, seconds (estimate) */
 #define LATE_DROP       0.100               /* drop frames more than this late */
+#define NET_BUFFER      (256 * 1024)        /* read-ahead for files on a share */
 
 typedef struct {
     AVPacket *pkt[PKTQ_CAP];
@@ -55,6 +57,7 @@ static struct {
     QFrame           fq[FRAMEQ_CAP];
     int              fq_head, fq_n;
     int              demux_eof, vdec_eof, adec_eof, quit;
+    int              paused;
 
     /* Audio clock: timestamp of the next sample to be queued, and when. */
     double           aclock_pts;
@@ -287,6 +290,14 @@ static void *audio_thread(void *arg)
                 buffered += n;
 
             while (buffered >= AUDIO_GRAIN) {
+                pthread_mutex_lock(&P.lock);
+                while (P.paused && !P.quit)
+                    pthread_cond_wait(&P.cond, &P.lock);
+                stop = P.quit;
+                pthread_mutex_unlock(&P.lock);
+                if (stop)
+                    break;
+
                 plat_audio_write(buf + rd * 2);
                 rd += AUDIO_GRAIN;
                 buffered -= AUDIO_GRAIN;
@@ -438,6 +449,68 @@ static void log_to_screen(void *avcl, int level, const char *fmt, va_list ap)
     }
 }
 
+/* --- files on a network share -------------------------------------------- */
+
+static int net_read(void *opaque, uint8_t *buf, int size)
+{
+    int n = smb_read(opaque, buf, size);
+    if (n == 0)
+        return AVERROR_EOF;
+    return n < 0 ? AVERROR(EIO) : n;
+}
+
+static int64_t net_seek(void *opaque, int64_t offset, int whence)
+{
+    if (whence & AVSEEK_SIZE)
+        return smb_size(opaque);
+    int64_t pos = smb_seek(opaque, offset, whence & ~AVSEEK_FORCE);
+    return pos < 0 ? AVERROR(EIO) : pos;
+}
+
+/* Opens path (a local file or an smb:// address) for demuxing. */
+static int open_input(const char *path, SmbFile **net)
+{
+    *net = NULL;
+    if (!smb_is_url(path))
+        return avformat_open_input(&P.fmt, path, NULL, NULL);
+
+    char err[200];
+    SmbFile *f = smb_open(path, err, sizeof(err));
+    if (!f) {
+        osd_log("%s", err);
+        return AVERROR(EIO);
+    }
+
+    uint8_t *buffer = av_malloc(NET_BUFFER);
+    AVIOContext *io = avio_alloc_context(buffer, NET_BUFFER, 0, f, net_read, NULL, net_seek);
+    P.fmt = avformat_alloc_context();
+    P.fmt->pb = io;
+
+    char shown[1024];
+    smb_display_name(path, shown, sizeof(shown));      /* the name helps format detection */
+    int rc = avformat_open_input(&P.fmt, shown, NULL, NULL);
+    if (rc < 0) {                                       /* P.fmt was freed, the I/O part is ours */
+        av_freep(&io->buffer);
+        avio_context_free(&io);
+        smb_close(f);
+        return rc;
+    }
+    *net = f;
+    return 0;
+}
+
+static void close_input(SmbFile *net)
+{
+    AVIOContext *io = net ? P.fmt->pb : NULL;
+
+    avformat_close_input(&P.fmt);
+    if (io) {
+        av_freep(&io->buffer);
+        avio_context_free(&io);
+    }
+    smb_close(net);
+}
+
 /* --- main entry --------------------------------------------------------- */
 
 int player_run(const char *path, double max_seconds, PlayerStats *stats)
@@ -445,6 +518,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     pthread_t demux_t, video_t, audio_t;
     Scaler scaler = { 0 };
     PlayerStats st = { 0 };
+    SmbFile *net = NULL;
     int rc;
 
     memset(&P, 0, sizeof(P));
@@ -452,7 +526,10 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     pthread_cond_init(&P.cond, NULL);
     av_log_set_callback(log_to_screen);
 
-    rc = avformat_open_input(&P.fmt, path, NULL, NULL);
+    if (stats)
+        *stats = st;
+
+    rc = open_input(path, &net);
     if (rc < 0) {
         osd_log("cannot open file: %s", av_err2str(rc));
         return -1;
@@ -460,7 +537,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     rc = avformat_find_stream_info(P.fmt, NULL);
     if (rc < 0) {
         osd_log("cannot read stream info: %s", av_err2str(rc));
-        avformat_close_input(&P.fmt);
+        close_input(net);
         return -1;
     }
 
@@ -471,7 +548,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
 
     if (P.vidx < 0) {
         osd_log("no video stream in this file");
-        avformat_close_input(&P.fmt);
+        close_input(net);
         return -1;
     }
 
@@ -485,7 +562,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
 
     P.vdec = open_decoder(vst, big ? VIDEO_THREADS_HD : VIDEO_THREADS);
     if (!P.vdec) {
-        avformat_close_input(&P.fmt);
+        close_input(net);
         return -1;
     }
     osd_log("video: %s %dx%d %.3f fps", avcodec_get_name(vst->codecpar->codec_id),
@@ -522,11 +599,38 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     double first_pts = NAN, last_diff = 0.0, convert_total = 0.0;
     int consecutive_drops = 0, shown_this_sec = 0, fps_now = 0;
     char stat_line[160] = "";
-    int failed = 0;
+    int failed = 0, paused = 0;
+    unsigned pad_prev = plat_pad();                 /* ignore buttons still held from the menu */
+    uint64_t pause_start = 0;
 
     for (;;) {
         QFrame qf = { 0 };
         int have, done;
+
+        /* Controller: circle stops, cross pauses and continues. */
+        unsigned pad = plat_pad();
+        unsigned pressed = pad & ~pad_prev;
+        pad_prev = pad;
+        if (pressed & PAD_CIRCLE)
+            break;
+        if (pressed & PAD_CROSS) {
+            uint64_t now = plat_time_us();
+            paused = !paused;
+            pthread_mutex_lock(&P.lock);
+            P.paused = paused;
+            if (!paused)
+                P.aclock_time = now;                /* the audio clock stood still meanwhile */
+            pthread_cond_broadcast(&P.cond);
+            pthread_mutex_unlock(&P.lock);
+            if (paused)
+                pause_start = now;
+            else
+                wall_start += now - pause_start;
+        }
+        if (paused) {
+            plat_sleep_us(20000);
+            continue;
+        }
 
         pthread_mutex_lock(&P.lock);
         have = P.fq_n > 0;
@@ -653,7 +757,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     sws_freeContext(scaler.sws);
     avcodec_free_context(&P.vdec);
     avcodec_free_context(&P.adec);
-    avformat_close_input(&P.fmt);
+    close_input(net);
     pthread_mutex_destroy(&P.lock);
     pthread_cond_destroy(&P.cond);
 

@@ -28,6 +28,20 @@ void      plat_flip(void);
 /* Queues AUDIO_GRAIN stereo S16 frames; blocks until there is room. */
 void      plat_audio_write(const int16_t *pcm);
 
+/* Controller buttons held down right now, as a mask of PAD_* bits. */
+#define PAD_UP        0x0001u
+#define PAD_DOWN      0x0002u
+#define PAD_LEFT      0x0004u
+#define PAD_RIGHT     0x0008u
+#define PAD_CROSS     0x0010u
+#define PAD_CIRCLE    0x0020u
+#define PAD_TRIANGLE  0x0040u
+#define PAD_SQUARE    0x0080u
+#define PAD_L1        0x0100u
+#define PAD_R1        0x0200u
+#define PAD_OPTIONS   0x0400u
+unsigned  plat_pad(void);
+
 uint64_t  plat_time_us(void);
 void      plat_sleep_us(unsigned us);
 

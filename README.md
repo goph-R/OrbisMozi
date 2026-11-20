@@ -6,8 +6,8 @@ Player refuses: MKV and other containers, decoded with FFmpeg.
 It is homebrew for consoles that can run fake-signed packages (for example
 with GoldHEN). *Mozi* is Hungarian for cinema; *Orbis* is the PS4's codename.
 
-> **Status: early.** Playback works and stays in sync, but there are no
-> controls yet. The player picks one file and plays it from start to end.
+> **Status: early.** Playback works and stays in sync. There is a plain file
+> list, pause and stop; seeking, audio track choice and subtitles are missing.
 
 ## What works
 
@@ -26,31 +26,55 @@ Tested on a PS4 Pro:
   Vorbis, Opus, WMA, PCM. Multichannel audio is mixed down to stereo.
 - The screen runs at 1280x720 for sources up to 720p and switches to
   1920x1080 for larger ones.
+- Files can be played from the console's disk or straight from a network
+  share (SMB2/SMB3). Tested with a Samba server: a 1080p film starts in
+  well under a second.
 - Decoding is done on the CPU. 4K and heavy H.265 files are not expected to
   play smoothly.
 
 ## Not there yet
 
-- Controller input: pause, seek, stop
-- A file browser
+- Seeking
 - Choosing the audio track (the file's default track is used)
 - Subtitles
 - A way to hide the diagnostic line at the top of the picture
+- A designed interface (the list is plain text for now)
+- Entering a share on the console (it is a text file for now)
 
 ## Using it
 
 1. Build the package (see below) and install it with your package installer.
-2. Put a video into `/data/video` on the console's internal disk, for example
-   with GoldHEN's FTP server (port 2121):
+2. Start *Orbis Mozi* once. It creates two folders on the console's disk:
+   `/data/video` for videos and `/data/orbismozi` for its settings.
+3. Give it something to play, either or both:
+   - **Copy videos to the console**, for example with GoldHEN's FTP server
+     (port 2121). Subfolders are fine.
 
-   ```sh
-   curl -T film.mkv ftp://<ps4-ip>:2121/data/video/
-   ```
+     ```sh
+     curl -T film.mkv ftp://<ps4-ip>:2121/data/video/
+     ```
+   - **Name a network share.** Edit `/data/orbismozi/shares.txt` (fetch it
+     over FTP, change it, put it back). One share per line:
 
-   The player creates `/data/video` the first time it runs.
-3. Start *Orbis Mozi*. It shows a log for a few seconds, then plays the
-   alphabetically first video in `/data/video`. Subfolders are ignored.
-4. Quit with the PS button.
+     ```
+     smb://user:password@192.168.1.10/share
+     smb://192.168.1.10/public/films
+     ```
+
+     The server has to offer SMB2 or SMB3; the old SMB1 protocol alone is
+     not enough. The password is stored on the console as plain text.
+4. Pick a video in the list.
+
+The app writes its log to `/data/orbismozi/log.txt` on every start, which is
+the thing to look at (or attach to a bug report) when something does not work.
+
+| Button | In the list | While playing |
+|---|---|---|
+| D-pad up/down | move | |
+| L1 / R1, D-pad left/right | page up / down | |
+| Cross | open folder / play | pause, continue |
+| Circle | back | stop, return to the list |
+| PS | | quit |
 
 **Why not a USB drive?** A PS4 application runs in a sandbox that does not
 contain the USB mount points, so the player cannot see them. `/data` is
@@ -66,11 +90,11 @@ Built and tested on Ubuntu 24.04 with clang 18.
 
 ### 1. Tools
 
-`clang`, `lld`, `nasm`, `llvm-ar`, `make`, `curl`, and Python 3 with Pillow if
+`clang`, `lld`, `nasm`, `llvm-ar`, `make`, `cmake`, `git`, `curl`, and Python 3 with Pillow if
 you want to regenerate the font or icon.
 
 ```sh
-sudo apt install clang lld nasm llvm make curl
+sudo apt install clang lld nasm llvm make curl cmake git
 ```
 
 ### 2. The OpenOrbis toolchain
@@ -82,6 +106,7 @@ PS4-Toolchain/
   OpenOrbis/PS4Toolchain/     OpenOrbis release (headers, libraries, tools)
   ffmpeg-ps4/                 FFmpeg for the PS4   (built in step 3)
   ffmpeg-host/                FFmpeg for the PC    (built in step 3)
+  libsmb2-ps4/  libsmb2-host/ libsmb2              (built in step 4)
 OrbisMozi/                    this repository
 ```
 
@@ -118,7 +143,16 @@ This downloads FFmpeg 7.1.1 and builds static libraries twice: for the PS4
 (`ffmpeg-ps4`) and for the PC (`ffmpeg-host`, used only for testing). The list
 of enabled formats is at the top of the script.
 
-### 4. The package
+### 4. libsmb2
+
+```sh
+tools/build-libsmb2.sh
+```
+
+This fetches libsmb2 7.0.0 (the SMB2/SMB3 client used for network shares) and
+builds it for the PS4 and the PC. It needs `cmake` and `git`.
+
+### 5. The package
 
 ```sh
 make
@@ -130,8 +164,9 @@ Three system files every package needs (`right.sprx`, `libc.prx`,
 `libSceFios2.prx`) are copied from the toolchain's samples during the build;
 they are not part of this repository.
 
-Any video placed in `assets/videos/` is packed into the package and played
-when `/data/video` has none. That gives a self-contained test package.
+Any video placed in `assets/videos/` is packed into the package and shows up
+in the list as "Test clips inside the package". That gives a self-contained
+test package.
 
 ## Testing on the PC
 
@@ -142,7 +177,10 @@ time, so decoding, timing and sync can be checked without a PS4:
 ```sh
 make host
 build/player_host film.mkv 30        # play the first 30 seconds
+build/player_host smb://user:password@host/share/film.mkv 30
 ```
+
+Without arguments it shows the file list, driven by a scripted controller.
 
 It prints the same log as the console build, ending with a summary line
 (frames shown, frames dropped, worst picture/sound offset). Useful variables:
@@ -151,7 +189,11 @@ It prints the same log as the console build, ending with a summary line
 |---|---|
 | `PLAYER_DUMP_DIR=dir` | writes every 240th displayed frame there as a PPM image |
 | `PLAYER_WAV=file.wav` | writes the audio that would have been played |
+| `PLAYER_DUMP_EVERY=n` | write every nth frame instead |
 | `PLAYER_SIZE=1920x1080` | size of the fake screen at start |
+| `PLAYER_KEYS="d x 5000 o"` | scripted button presses: `u d l r` d-pad, `x o` buttons, a number waits that many ms |
+| `MOZI_LOCAL=dir` | folder shown as the console's video folder |
+| `MOZI_SHARES=file` | shares file to read instead of `/data/orbismozi/shares.txt` |
 
 ## How it works
 
@@ -162,7 +204,9 @@ It prints the same log as the console build, ending with a summary line
 | `src/plat_ps4.c` | PS4 implementation: `sceVideoOut` frame buffers, `sceAudioOut` |
 | `host/plat_host.c` | PC implementation used by `make host` |
 | `src/osd.c` | on-screen text and log (errors are otherwise invisible on a console) |
-| `src/main.c` | start-up: finds a file, runs the player, shows the result |
+| `src/smb.c` | network shares: folder listing and file reading through libsmb2 |
+| `src/browser.c` | the file list |
+| `src/main.c` | start-up and the loop: pick a file, play it, repeat |
 
 Four threads: one reads packets from the file, one decodes video, one decodes
 audio and feeds the audio device, and the main thread shows each frame when the
@@ -184,6 +228,8 @@ It builds on other people's work, which keeps its own licences:
   (the build script enables no GPL or non-free parts). If you distribute a
   built package, the LGPL's terms apply to the FFmpeg part of it; the build
   script and the sources here are what lets others rebuild it.
+- **libsmb2** is linked statically too and is also LGPL 2.1 or later; the
+  same applies to it.
 - **OpenOrbis PS4 Toolchain** (GPL 3.0) is used to build; its system files are
   copied at build time and are not included here.
 - **DejaVu Sans Mono** is the source of the on-screen font in
