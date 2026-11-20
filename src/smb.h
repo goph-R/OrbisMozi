@@ -13,7 +13,19 @@ typedef struct {
     int  is_dir;
 } SmbEntry;
 
+/* The pieces of a share address. */
+typedef struct {
+    char user[128], password[128], host[128], share[128];
+    char path[1024];                /* inside the share, no leading slash */
+} SmbParts;
+
 int  smb_is_url(const char *location);
+
+/* Takes an address apart / puts one together. Both return 0 on success.
+ * In an address, the characters % / @ : inside the user name or password
+ * are written as %XX. */
+int  smb_split(const char *url, SmbParts *parts);
+int  smb_join(const SmbParts *parts, char *out, size_t out_size);
 
 /* Copies the location without the password, for showing on screen. */
 void smb_display_name(const char *location, char *out, size_t out_size);

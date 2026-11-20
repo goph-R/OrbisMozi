@@ -14,10 +14,7 @@
 
 #define SMB_TIMEOUT 15              /* seconds before a silent server counts as gone */
 
-typedef struct {
-    char user[128], password[128], host[128], share[128];
-    char path[1024];                /* inside the share, no leading slash */
-} SmbUrl;
+static int parse_url(const char *url, SmbParts *u);
 
 int smb_is_url(const char *location)
 {
@@ -32,7 +29,67 @@ static void copy_part(char *dst, size_t dst_size, const char *src, size_t len)
     dst[len] = '\0';
 }
 
-static int parse_url(const char *url, SmbUrl *u)
+/* Undoes %XX escapes in place (used for user name and password). */
+static void unescape(char *text)
+{
+    char *out = text;
+
+    for (const char *p = text; *p; p++) {
+        unsigned v;
+        if (p[0] == '%' && p[1] && p[2] && sscanf(p + 1, "%2x", &v) == 1) {
+            *out++ = (char)v;
+            p += 2;
+        } else {
+            *out++ = *p;
+        }
+    }
+    *out = '\0';
+}
+
+/* Appends text to out, escaping the characters that structure an address. */
+static void append_escaped(char *out, size_t out_size, const char *text)
+{
+    size_t n = strlen(out);
+
+    for (; *text && n + 4 < out_size; text++) {
+        if (strchr("%/@:", *text) || (unsigned char)*text <= ' ')
+            n += (size_t)snprintf(out + n, out_size - n, "%%%02X", (unsigned char)*text);
+        else
+            out[n++] = *text;
+    }
+    out[n] = '\0';
+}
+
+int smb_join(const SmbParts *u, char *out, size_t out_size)
+{
+    if (!u->host[0] || !u->share[0] || out_size < 16)
+        return -1;
+    snprintf(out, out_size, "smb://");
+    if (u->user[0]) {
+        append_escaped(out, out_size, u->user);
+        if (u->password[0]) {
+            strncat(out, ":", out_size - strlen(out) - 1);
+            append_escaped(out, out_size, u->password);
+        }
+        strncat(out, "@", out_size - strlen(out) - 1);
+    }
+    size_t n = strlen(out);
+    const char *path = u->path;
+    while (*path == '/')
+        path++;
+    snprintf(out + n, out_size - n, "%s/%s%s%s", u->host, u->share, *path ? "/" : "", path);
+    n = strlen(out);
+    while (n > 0 && out[n - 1] == '/')
+        out[--n] = '\0';
+    return 0;
+}
+
+int smb_split(const char *url, SmbParts *u)
+{
+    return parse_url(url, u);
+}
+
+static int parse_url(const char *url, SmbParts *u)
 {
     memset(u, 0, sizeof(*u));
     if (!smb_is_url(url))
@@ -56,6 +113,8 @@ static int parse_url(const char *url, SmbUrl *u)
         } else {
             copy_part(u->user, sizeof(u->user), p, (size_t)(at - p));
         }
+        unescape(u->user);
+        unescape(u->password);
         p = at + 1;
     }
 
@@ -81,7 +140,7 @@ static int parse_url(const char *url, SmbUrl *u)
 
 void smb_display_name(const char *location, char *out, size_t out_size)
 {
-    SmbUrl u;
+    SmbParts u;
 
     if (parse_url(location, &u) != 0) {
         snprintf(out, out_size, "%s", location);
@@ -90,7 +149,7 @@ void smb_display_name(const char *location, char *out, size_t out_size)
     snprintf(out, out_size, "smb://%s/%s%s%s", u.host, u.share, u.path[0] ? "/" : "", u.path);
 }
 
-static struct smb2_context *connect_share(const SmbUrl *u, char *err, size_t err_size)
+static struct smb2_context *connect_share(const SmbParts *u, char *err, size_t err_size)
 {
     struct smb2_context *smb2 = smb2_init_context();
 
@@ -115,7 +174,7 @@ static struct smb2_context *connect_share(const SmbUrl *u, char *err, size_t err
 
 int smb_list(const char *url, SmbEntry **entries, int *count, char *err, size_t err_size)
 {
-    SmbUrl u;
+    SmbParts u;
     SmbEntry *list = NULL;
     int n = 0, cap = 0;
 
@@ -169,7 +228,7 @@ struct SmbFile {
 
 SmbFile *smb_open(const char *url, char *err, size_t err_size)
 {
-    SmbUrl u;
+    SmbParts u;
     struct smb2_stat_64 st;
 
     if (parse_url(url, &u) != 0 || !u.path[0]) {

@@ -1,5 +1,7 @@
 /* PS4 back end: sceVideoOut frame buffers and sceAudioOut. */
 #include <fcntl.h>
+#include <stddef.h>
+#include <wchar.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -10,6 +12,8 @@
 #include <orbis/libkernel.h>
 #include <orbis/VideoOut.h>
 #include <orbis/AudioOut.h>
+#include <orbis/ImeDialog.h>
+#include <orbis/Sysmodule.h>
 #include <orbis/Pad.h>
 #include <orbis/UserService.h>
 
@@ -20,7 +24,7 @@
 #define BUFFER_STRIDE 0x800000          /* 8 MB each: enough for 1920x1080x4 */
 #define VIDEO_MEM     (BUFFER_STRIDE * NUM_BUFFERS)
 
-static int               g_video, g_audio = -1, g_pad = -1;
+static int               g_video, g_audio = -1, g_pad = -1, g_user;
 static int               g_w, g_h;
 static OrbisKernelEqueue g_flip_queue;
 static void             *g_buffers[NUM_BUFFERS];
@@ -129,13 +133,11 @@ int plat_init(void)
     void *mem = NULL;
     int rc;
 
-    int user = 0;
-
     sceUserServiceInitialize(NULL);
 
     /* Controller of the user who started the application. */
-    if (scePadInit() == 0 && sceUserServiceGetInitialUser(&user) == 0)
-        g_pad = scePadOpen(user, 0, 0, NULL);
+    if (scePadInit() == 0 && sceUserServiceGetInitialUser(&g_user) == 0)
+        g_pad = scePadOpen(g_user, 0, 0, NULL);
     if (g_pad < 0)
         osd_log("cannot open the controller (0x%08X)", (unsigned)g_pad);
 
@@ -233,6 +235,111 @@ unsigned plat_pad(void)
         if (data.buttons & map[i].sce)
             out |= map[i].own;
     return out;
+}
+
+/* --- on-screen keyboard (the system's IME dialog; text is UTF-16) -------- */
+
+_Static_assert(sizeof(wchar_t) == 2, "the IME dialog takes UTF-16 text");
+
+#define IME_OPTION_PASSWORD 0x00000004u
+#define IME_MAX_CHARS       255
+
+static void utf8_to_utf16(const char *in, wchar_t *out, int out_cap)
+{
+    const unsigned char *p = (const unsigned char *)in;
+    int n = 0;
+
+    while (*p && n < out_cap - 1) {
+        unsigned c = *p++, cp = c;
+        int extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+        if (extra)
+            cp = c & (0x3F >> extra);
+        for (; extra > 0 && (*p & 0xC0) == 0x80; extra--)
+            cp = (cp << 6) | (*p++ & 0x3F);
+        out[n++] = cp < 0x10000 ? (wchar_t)cp : (wchar_t)'?';
+    }
+    out[n] = 0;
+}
+
+static void utf16_to_utf8(const wchar_t *in, char *out, int out_cap)
+{
+    int n = 0;
+
+    for (; *in && n < out_cap - 4; in++) {
+        unsigned cp = (unsigned short)*in;
+        if (cp < 0x80) {
+            out[n++] = (char)cp;
+        } else if (cp < 0x800) {
+            out[n++] = (char)(0xC0 | (cp >> 6));
+            out[n++] = (char)(0x80 | (cp & 0x3F));
+        } else {
+            out[n++] = (char)(0xE0 | (cp >> 12));
+            out[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[n++] = (char)(0x80 | (cp & 0x3F));
+        }
+    }
+    out[n] = '\0';
+}
+
+int plat_keyboard(const char *title, char *buf, int buf_size, int password, void (*redraw)(void))
+{
+    static int module = 1;                          /* 1 = not tried yet */
+    static wchar_t text[IME_MAX_CHARS + 1], wtitle[64];
+    OrbisImeDialogSetting param;
+    OrbisDialogResult result;
+    int rc, max_chars = buf_size - 1 < IME_MAX_CHARS ? buf_size - 1 : IME_MAX_CHARS;
+
+    if (module == 1) {
+        module = sceSysmoduleLoadModule(ORBIS_SYSMODULE_IME_DIALOG);
+        if (module != 0)
+            osd_log("system keyboard not available (0x%08X), using the built-in one", (unsigned)module);
+    }
+    if (module != 0)
+        return -1;
+
+    utf8_to_utf16(buf, text, max_chars + 1);
+    utf8_to_utf16(title, wtitle, 64);
+
+    memset(&param, 0, sizeof(param));
+    param.userId = (uint32_t)g_user;
+    param.type = ORBIS_TYPE_BASIC_LATIN;
+    param.enterLabel = ORBIS_BUTTON_LABEL_DEFAULT;
+    param.option = password ? IME_OPTION_PASSWORD : 0;
+    param.maxTextLength = (uint32_t)max_chars;
+    param.inputTextBuffer = text;
+    param.posx = 960.0f;                            /* centre of the dialog, in 1920x1080 units */
+    param.posy = 540.0f;
+    param.horizontalAlignment = ORBIS_H_CENTER;
+    param.verticalAlignment = ORBIS_V_CENTER;
+    param.title = wtitle;
+
+    rc = sceImeDialogInit(&param, NULL);
+    if (rc < 0) {
+        osd_log("system keyboard failed to open (0x%08X), using the built-in one", (unsigned)rc);
+        module = rc;
+        return -1;
+    }
+
+    for (;;) {
+        OrbisDialogStatus status = sceImeDialogGetStatus();
+        if (status == ORBIS_DIALOG_STATUS_STOPPED)
+            break;
+        if (status == ORBIS_DIALOG_STATUS_NONE) {   /* it never came up */
+            sceImeDialogTerm();
+            osd_log("system keyboard did not start, using the built-in one");
+            module = -1;
+            return -1;
+        }
+        redraw();                                   /* keep the screen alive behind the dialog */
+    }
+
+    memset(&result, 0, sizeof(result));
+    sceImeDialogGetResult(&result);
+    sceImeDialogTerm();
+    if (result.endstatus != ORBIS_DIALOG_OK)
+        return 0;
+    utf16_to_utf8(text, buf, buf_size);
+    return 1;
 }
 
 uint64_t plat_time_us(void)

@@ -11,6 +11,7 @@
 #include "browser.h"
 #include "osd.h"
 #include "plat.h"
+#include "shareform.h"
 #include "smb.h"
 
 #define MAX_ROOTS   16
@@ -111,6 +112,51 @@ static void read_roots(void)
     fclose(f);
 }
 
+/* Writes the network shares of the top-level list back to the shares file. */
+static void save_roots(void)
+{
+    FILE *f = fopen(shares_file(), "w");
+
+    if (!f) {
+        snprintf(B.message, sizeof(B.message), "cannot write %s: %s", shares_file(), strerror(errno));
+        osd_log("%s", B.message);
+        return;
+    }
+    fprintf(f, "# Orbis Mozi - network shares, one per line:\n"
+               "#   smb://user:password@server/share/folder\n"
+               "# In user and password, write %% / @ : as %%25 %%2F %%40 %%3A.\n");
+    for (int i = 0; i < B.n_roots; i++)
+        if (smb_is_url(B.roots[i]))
+            fprintf(f, "%s\n", B.roots[i]);
+    fclose(f);
+}
+
+/* Opens the form for the share at index i of the top-level list
+ * (i == B.n_roots: a new one) and applies the result. */
+static void edit_share(int i)
+{
+    char url[PATH_MAX_] = "";
+    int is_new = i >= B.n_roots;
+
+    if (is_new && B.n_roots >= MAX_ROOTS) {
+        snprintf(B.message, sizeof(B.message), "The list is full (%d entries).", MAX_ROOTS);
+        return;
+    }
+    if (!is_new)
+        snprintf(url, sizeof(url), "%s", B.roots[i]);
+
+    int result = shareform_run(url, sizeof(url), is_new);
+    if (result == FORM_SAVE) {
+        snprintf(B.roots[is_new ? B.n_roots++ : i], PATH_MAX_, "%s", url);
+    } else if (result == FORM_DELETE) {
+        for (int k = i; k < B.n_roots - 1; k++)
+            memcpy(B.roots[k], B.roots[k + 1], PATH_MAX_);
+        B.n_roots--;
+    }
+    if (result != FORM_CANCEL)
+        save_roots();
+}
+
 static int list_local(const char *dir)
 {
     DIR *d = opendir(dir);
@@ -192,7 +238,7 @@ static void load(void)
 
 static int count(void)
 {
-    return B.cur[0] ? B.n_items : B.n_roots;
+    return B.cur[0] ? B.n_items : B.n_roots + 1;    /* + "Add network share" */
 }
 
 /* --- drawing ------------------------------------------------------------- */
@@ -228,7 +274,9 @@ static void label_of(int i, char *out, size_t out_size, int *is_dir)
         return;
     }
     *is_dir = 1;
-    if (smb_is_url(B.roots[i])) {
+    if (i >= B.n_roots) {
+        snprintf(out, out_size, "Add network share...");
+    } else if (smb_is_url(B.roots[i])) {
         smb_display_name(B.roots[i], out, out_size);
     } else if (strcmp(B.roots[i], "/app0/assets/videos") == 0) {
         snprintf(out, out_size, "Test clips inside the package");
@@ -302,12 +350,8 @@ static void draw(const char *busy)
         text[0] = '\0';
     osd_text(fb, W, H, W - margin_x - (int)strlen(text) * fw, foot_y, text, COL_DIM, COL_BG);
     osd_text(fb, W, H, margin_x, foot_y,
-             B.cur[0] ? "X open    O back    L1/R1 page up/down" : "X open    L1/R1 page up/down",
+             B.cur[0] ? "X open    O back    L1/R1 page up/down" : "X open    Square change or delete a share",
              COL_DIM, COL_BG);
-    if (!B.cur[0]) {
-        snprintf(text, sizeof(text), "Network shares are read from %s", shares_file());
-        osd_text(fb, W, H, margin_x, foot_y - fh - 4, text, COL_DIM, COL_BG);
-    }
 
     plat_flip();
 }
@@ -377,8 +421,14 @@ int browser_pick(char *out, size_t out_size)
 
         if (pressed & PAD_CIRCLE) {
             go_up();
+        } else if ((pressed & PAD_SQUARE) && !B.cur[0] && B.sel < B.n_roots && smb_is_url(B.roots[B.sel])) {
+            edit_share(B.sel);
+            prev = plat_pad();
         } else if ((pressed & PAD_CROSS) && n > 0) {
-            if (!B.cur[0]) {
+            if (!B.cur[0] && B.sel >= B.n_roots) {
+                edit_share(B.n_roots);
+                prev = plat_pad();
+            } else if (!B.cur[0]) {
                 enter(B.roots[B.sel], 1);
             } else {
                 char target[PATH_MAX_ + 300];

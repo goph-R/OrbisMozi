@@ -42,6 +42,12 @@ void      plat_audio_write(const int16_t *pcm);
 #define PAD_OPTIONS   0x0400u
 unsigned  plat_pad(void);
 
+/* The system's on-screen keyboard, editing the UTF-8 text in buf.
+ * Returns 1 if confirmed, 0 if cancelled, -1 if there is no such keyboard
+ * (the caller then uses its own). redraw() is called once per frame and
+ * must draw and flip. */
+int       plat_keyboard(const char *title, char *buf, int buf_size, int password, void (*redraw)(void));
+
 uint64_t  plat_time_us(void);
 void      plat_sleep_us(unsigned us);
 

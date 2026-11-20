@@ -6,7 +6,7 @@
  *   PLAYER_WAV        write all audio to this WAV file
  *   PLAYER_SIZE       WxH of the fake screen (default 1280x720)
  *   PLAYER_KEYS       scripted controller, e.g. "d d x 5000 o": u d l r = d-pad,
- *                     x o t s = buttons, L R = L1/R1, a number = wait that many milliseconds.
+ *                     x o t s = buttons, p = OPTIONS, L R = L1/R1, a number = wait that many milliseconds.
  *                     Each press takes 300 ms. The program exits when the script ends.
  *   PLAYER_DUMP_EVERY write every Nth frame instead of every 240th */
 #define _GNU_SOURCE
@@ -157,6 +157,7 @@ unsigned plat_pad(void)
         case 'o': button = PAD_CIRCLE; break;
         case 't': button = PAD_TRIANGLE; break;
         case 's': button = PAD_SQUARE; break;
+        case 'p': button = PAD_OPTIONS; break;
         case 'L': button = PAD_L1; break;
         case 'R': button = PAD_R1; break;
         }
@@ -167,6 +168,12 @@ unsigned plat_pad(void)
             return 0;
     }
     exit(0);                                        /* script finished */
+}
+
+int plat_keyboard(const char *title, char *buf, int buf_size, int password, void (*redraw)(void))
+{
+    (void)title; (void)buf; (void)buf_size; (void)password; (void)redraw;
+    return -1;                                      /* the built-in keyboard gets tested instead */
 }
 
 void plat_audio_write(const int16_t *pcm)

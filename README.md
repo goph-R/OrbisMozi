@@ -37,7 +37,6 @@ Tested on a PS4 Pro:
 - Choosing the audio track (the file's default track is used)
 - Subtitles
 - A designed interface (the list is plain text for now)
-- Entering a share on the console (it is a text file for now)
 
 ## Using it
 
@@ -51,16 +50,15 @@ Tested on a PS4 Pro:
      ```sh
      curl -T film.mkv ftp://<ps4-ip>:2121/data/video/
      ```
-   - **Name a network share.** Edit `/data/orbismozi/shares.txt` (fetch it
-     over FTP, change it, put it back). One share per line:
-
-     ```
-     smb://user:password@192.168.1.10/share
-     smb://192.168.1.10/public/films
-     ```
+   - **Add a network share.** Choose "Add network share..." in the list
+     and fill in the server address, share name, user and password. "Test
+     connection" tells you whether it works before you save. Square on a
+     share in the list changes or deletes it.
 
      The server has to offer SMB2 or SMB3; the old SMB1 protocol alone is
-     not enough. The password is stored on the console as plain text.
+     not enough. The password is stored on the console as plain text, in
+     `/data/orbismozi/shares.txt` (one `smb://user:password@server/share`
+     per line, which can also be edited by hand).
 4. Pick a video in the list.
 
 The app writes its log to `/data/orbismozi/log.txt` on every start, which is
@@ -72,6 +70,7 @@ the thing to look at (or attach to a bug report) when something does not work.
 | D-pad left/right | page up / down | 10 seconds back / forward |
 | L1 / R1 | page up / down | 10 minutes back / forward |
 | Cross | open folder / play | pause, continue |
+| Square | change or delete a share | |
 | Circle | back | stop, return to the list |
 | Triangle | | show / hide the diagnostics line |
 | PS | | quit |
@@ -208,6 +207,8 @@ It prints the same log as the console build, ending with a summary line
 | `src/osd.c` | on-screen text and log (errors are otherwise invisible on a console) |
 | `src/smb.c` | network shares: folder listing and file reading through libsmb2 |
 | `src/browser.c` | the file list |
+| `src/shareform.c` | the form for adding or changing a network share |
+| `src/textinput.c` | text entry: the system keyboard, or a built-in one |
 | `src/main.c` | start-up and the loop: pick a file, play it, repeat |
 
 Four threads: one reads packets from the file, one decodes video, one decodes

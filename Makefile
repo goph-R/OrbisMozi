@@ -30,7 +30,7 @@ SSL11       ?= $(PS4TC)/libssl11/usr/lib/x86_64-linux-gnu
 PKGTOOL     := DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 LD_LIBRARY_PATH=$(SSL11) $(TOOLS)/PkgTool.Core
 
 FFLIBS      := -lavformat -lavcodec -lswscale -lswresample -lavutil
-LIBS        := $(FFLIBS) -lsmb2 -lm -lc -lkernel -lSceVideoOut -lSceAudioOut -lSceUserService -lScePad -lSceNet
+LIBS        := $(FFLIBS) -lsmb2 -lm -lc -lkernel -lSceVideoOut -lSceAudioOut -lSceUserService -lScePad -lSceNet -lSceImeDialog -lSceSysmodule
 CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -march=btver2 \
                -Wall -Wextra -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -I$(FFMPEG)/include -I$(SMB2)/include
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
@@ -85,7 +85,7 @@ $(BUILD):
 	mkdir -p $@
 
 # PC test build: same player core, fake display and audio device.
-HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c host/plat_host.c
+HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c src/textinput.c src/shareform.c host/plat_host.c
 host: $(BUILD)/player_host
 $(BUILD)/player_host: $(HOST_SRCS) $(wildcard src/*.h) | $(BUILD)
 	clang -O2 -g -Wall -Wextra -I$(FFMPEG_HOST)/include -I$(SMB2_HOST)/include -o $@ $(HOST_SRCS) \
