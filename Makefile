@@ -78,16 +78,16 @@ eboot.bin: $(OBJS)
 	$(LD) $(OBJS) -o $(BUILD)/player.elf $(LDFLAGS)
 	$(TOOLS)/create-fself -in=$(BUILD)/player.elf -out=$(BUILD)/player.oelf --eboot "eboot.bin" --paid 0x3800000000000011
 
-$(BUILD)/%.o: src/%.c $(wildcard src/*.h) | $(BUILD)
+$(BUILD)/%.o: src/%.c $(wildcard src/*.h) src/subfont.bin | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD):
 	mkdir -p $@
 
 # PC test build: same player core, fake display and audio device.
-HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c src/textinput.c src/shareform.c host/plat_host.c
+HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c src/textinput.c src/shareform.c src/subfont.c host/plat_host.c
 host: $(BUILD)/player_host
-$(BUILD)/player_host: $(HOST_SRCS) $(wildcard src/*.h) | $(BUILD)
+$(BUILD)/player_host: $(HOST_SRCS) $(wildcard src/*.h) src/subfont.bin | $(BUILD)
 	clang -O2 -g -Wall -Wextra -I$(FFMPEG_HOST)/include -I$(SMB2_HOST)/include -o $@ $(HOST_SRCS) \
 	      -L$(FFMPEG_HOST)/lib -L$(SMB2_HOST)/lib $(FFLIBS) -lsmb2 -lm -lpthread
 

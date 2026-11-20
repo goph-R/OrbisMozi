@@ -38,6 +38,7 @@ COMPONENTS="
 --enable-demuxer=matroska,mov,avi,mpegts,mpegps,flv,asf,ogg,wav,mp3,aac,ac3,flac,m4v,h264,hevc,mpegvideo
 --enable-decoder=h264,hevc,mpeg4,mpeg2video,mpeg1video,msmpeg4v2,msmpeg4v3,vp8,vp9,vc1,wmv3,mjpeg
 --enable-decoder=aac,aac_latm,ac3,eac3,mp3,mp2,dca,truehd,flac,vorbis,opus,wmav2,pcm_s16le,pcm_s24le
+--enable-decoder=subrip,srt,ass,ssa,mov_text,webvtt,text
 --enable-parser=h264,hevc,mpeg4video,mpegvideo,aac,aac_latm,ac3,mpegaudio,vp8,vp9,dca,flac,opus,vorbis,vc1,mjpeg
 "
 

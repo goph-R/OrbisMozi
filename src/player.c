@@ -29,6 +29,7 @@
 #include "plat.h"
 #include "player.h"
 #include "smb.h"
+#include "subfont.h"
 
 #define PKTQ_CAP        2048
 #define PKTQ_ENOUGH     48                  /* packets per stream considered "full" */
@@ -39,6 +40,8 @@
 #define AUDIO_LATENCY   0.040               /* device + mixer delay, seconds (estimate) */
 #define LATE_DROP       0.100               /* drop frames more than this late */
 #define NET_BUFFER      (256 * 1024)        /* read-ahead for files on a share */
+#define CUE_CAP         32                  /* subtitle lines kept ready */
+#define MAX_TRACKS      32
 
 typedef struct {
     AVPacket *pkt[PKTQ_CAP];
@@ -52,6 +55,11 @@ typedef struct {
     int      serial;
 } QFrame;
 
+typedef struct {
+    double start, end;                  /* stream time */
+    char   text[400];
+} Cue;
+
 static struct {
     AVFormatContext *fmt;
     AVCodecContext  *vdec, *adec;
@@ -64,6 +72,14 @@ static struct {
     int              fq_head, fq_n;
     int              demux_eof, vdec_eof, adec_eof, quit;
     int              paused;
+
+    /* Track changes are asked for through the *_want fields and carried out
+     * by the demux thread: subtitles at once, audio together with a seek. */
+    int              aidx_want;
+    int              sidx, sidx_want;   /* subtitle stream, -1 = off */
+    AVCodecContext  *sdec;              /* used by the demux thread only */
+    Cue              cues[CUE_CAP];
+    int              cue_next;          /* ring position for the next cue */
 
     int              serial;            /* increased by every completed seek */
     int              seek_req;
@@ -134,6 +150,97 @@ static int demux_must_wait(void)
     return v_ok && a_ok;
 }
 
+/* --- subtitles (decoded by the demux thread: it is hardly any work) ------- */
+
+static AVCodecContext *open_decoder(AVStream *st, int threads);
+
+/* Turns one ASS event ("ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,
+ * Effect,Text") into plain text: drops {\tags}, \N becomes a line break. */
+static void ass_to_text(const char *ass, char *out, size_t out_size)
+{
+    size_t n = 0;
+
+    for (int commas = 0; commas < 8 && *ass; ass++)
+        if (*ass == ',')
+            commas++;
+
+    while (*ass && n + 1 < out_size) {
+        if (*ass == '{') {
+            const char *close = strchr(ass, '}');
+            if (close) {
+                ass = close + 1;
+                continue;
+            }
+        }
+        if (ass[0] == '\\' && (ass[1] == 'N' || ass[1] == 'n')) {
+            out[n++] = '\n';
+            ass += 2;
+        } else if (ass[0] == '\\' && ass[1] == 'h') {
+            out[n++] = ' ';
+            ass += 2;
+        } else {
+            out[n++] = *ass++;
+        }
+    }
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' '))
+        n--;
+    out[n] = '\0';
+}
+
+static void decode_subtitle(AVPacket *pkt)
+{
+    AVSubtitle sub;
+    int got = 0;
+
+    if (!P.sdec || avcodec_decode_subtitle2(P.sdec, &sub, &got, pkt) < 0 || !got)
+        return;
+
+    double tb = av_q2d(P.fmt->streams[pkt->stream_index]->time_base);
+    double start = pkt->pts != AV_NOPTS_VALUE ? pkt->pts * tb : 0.0;
+    double length = pkt->duration > 0 ? pkt->duration * tb
+                  : sub.end_display_time > 0 && sub.end_display_time != UINT32_MAX
+                  ? sub.end_display_time / 1000.0 : 4.0;
+    start += sub.start_display_time / 1000.0;
+
+    for (unsigned i = 0; i < sub.num_rects; i++) {
+        Cue cue = { .start = start, .end = start + length };
+        const AVSubtitleRect *r = sub.rects[i];
+
+        if (r->type == SUBTITLE_ASS && r->ass)
+            ass_to_text(r->ass, cue.text, sizeof(cue.text));
+        else if (r->type == SUBTITLE_TEXT && r->text)
+            snprintf(cue.text, sizeof(cue.text), "%s", r->text);
+        if (!cue.text[0])
+            continue;
+
+        pthread_mutex_lock(&P.lock);
+        P.cues[P.cue_next] = cue;
+        P.cue_next = (P.cue_next + 1) % CUE_CAP;
+        pthread_mutex_unlock(&P.lock);
+    }
+    avsubtitle_free(&sub);
+}
+
+/* Switches to subtitle stream `want` (-1 = none). Demux thread only. */
+static void switch_subtitles(int want)
+{
+    if (P.sidx >= 0)
+        P.fmt->streams[P.sidx]->discard = AVDISCARD_ALL;
+    avcodec_free_context(&P.sdec);
+    if (want >= 0) {
+        P.sdec = open_decoder(P.fmt->streams[want], 1);
+        if (P.sdec)
+            P.fmt->streams[want]->discard = AVDISCARD_DEFAULT;
+        else
+            want = -1;
+    }
+
+    pthread_mutex_lock(&P.lock);
+    P.sidx = P.sidx_want = want;
+    memset(P.cues, 0, sizeof(P.cues));
+    pthread_mutex_unlock(&P.lock);
+}
+
 /* --- demux thread ------------------------------------------------------- */
 
 static void *demux_thread(void *arg)
@@ -142,13 +249,19 @@ static void *demux_thread(void *arg)
 
     for (;;) {
         pthread_mutex_lock(&P.lock);
-        while (!P.quit && !P.seek_req && (P.demux_eof || demux_must_wait()))
+        while (!P.quit && !P.seek_req && P.sidx_want == P.sidx && (P.demux_eof || demux_must_wait()))
             pthread_cond_wait(&P.cond, &P.lock);
         int quit = P.quit, seek = P.seek_req;
+        int sub_want = P.sidx_want, audio_want = P.aidx_want;
         double target = P.seek_target, from = P.seek_from;
         pthread_mutex_unlock(&P.lock);
         if (quit)
             break;
+
+        if (sub_want != P.sidx) {
+            switch_subtitles(sub_want);
+            continue;
+        }
 
         if (seek) {
             /* Land on a key frame on the far side of where we came from,
@@ -163,10 +276,18 @@ static void *demux_thread(void *arg)
             else
                 osd_log("seek %+.0f s to %.1f s", target - from, target);
 
+            if (rc >= 0 && audio_want != P.aidx && audio_want >= 0 && P.aidx >= 0) {  /* the other sound track from here on */
+                P.fmt->streams[P.aidx]->discard = AVDISCARD_ALL;
+                P.fmt->streams[audio_want]->discard = AVDISCARD_DEFAULT;
+            }
+
             pthread_mutex_lock(&P.lock);
             if (rc >= 0) {
                 pktq_clear(&P.vq);
                 pktq_clear(&P.aq);
+                memset(P.cues, 0, sizeof(P.cues));
+                if (audio_want >= 0 && P.aidx >= 0)
+                    P.aidx = audio_want;
                 P.serial++;
                 P.demux_eof = 0;
                 P.vdec_eof = 0;                     /* the decoder is about to get new work */
@@ -192,6 +313,9 @@ static void *demux_thread(void *arg)
             continue;
         }
 
+        if (pkt->stream_index == P.sidx)
+            decode_subtitle(pkt);
+
         pthread_mutex_lock(&P.lock);
         if (pkt->stream_index == P.vidx)
             pktq_push(&P.vq, pkt);
@@ -202,6 +326,7 @@ static void *demux_thread(void *arg)
         pthread_cond_broadcast(&P.cond);
         pthread_mutex_unlock(&P.lock);
     }
+    avcodec_free_context(&P.sdec);
     return NULL;
 }
 
@@ -289,8 +414,8 @@ static void *video_thread(void *arg)
 
 static void *audio_thread(void *arg)
 {
-    AVStream *st = P.fmt->streams[P.aidx];
-    double tb = av_q2d(st->time_base);
+    int my_idx = P.aidx;
+    double tb = av_q2d(P.fmt->streams[my_idx]->time_base);
     AVFrame *frame = av_frame_alloc();
     SwrContext *swr = NULL;
     AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
@@ -310,7 +435,27 @@ static void *audio_thread(void *arg)
         if (got < 0)
             break;
         if (serial != my_serial) {                  /* a seek happened: forget what was buffered */
-            avcodec_flush_buffers(P.adec);
+            pthread_mutex_lock(&P.lock);
+            int idx = P.aidx;
+            pthread_mutex_unlock(&P.lock);
+            if (idx != my_idx) {                    /* ...and it brought another sound track */
+                AVStream *st = P.fmt->streams[idx];
+                AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", NULL, 0);
+                avcodec_free_context(&P.adec);
+                P.adec = open_decoder(st, 1);
+                my_idx = idx;
+                tb = av_q2d(st->time_base);
+                if (!P.adec) {
+                    osd_log("cannot play this sound track - sound disabled");
+                    av_packet_free(&pkt);
+                    break;
+                }
+                osd_log("audio: %s %d Hz %d ch [%s]", avcodec_get_name(st->codecpar->codec_id),
+                        st->codecpar->sample_rate, st->codecpar->ch_layout.nb_channels,
+                        lang ? lang->value : "?");
+            } else {
+                avcodec_flush_buffers(P.adec);
+            }
             swr_free(&swr);
             my_serial = serial;
             rd = buffered = 0;
@@ -561,6 +706,30 @@ static void log_to_screen(void *avcl, int level, const char *fmt, va_list ap)
     }
 }
 
+/* Describes a track for the on-screen note, e.g. "hun - Hun Full (subrip)". */
+static void track_label(int stream, char *out, size_t out_size)
+{
+    AVStream *st = P.fmt->streams[stream];
+    AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", NULL, 0);
+    AVDictionaryEntry *title = av_dict_get(st->metadata, "title", NULL, 0);
+    char detail[64];
+
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+        snprintf(detail, sizeof(detail), "%s, %d ch", avcodec_get_name(st->codecpar->codec_id),
+                 st->codecpar->ch_layout.nb_channels);
+    else
+        snprintf(detail, sizeof(detail), "%s", avcodec_get_name(st->codecpar->codec_id));
+    snprintf(out, out_size, "%s%s%s (%s)", lang ? lang->value : "", lang && title ? " - " : "",
+             title ? title->value : lang ? "" : "unnamed", detail);
+}
+
+/* Text subtitles only: pictures (Blu-ray, DVD) cannot be drawn yet. */
+static int is_text_subtitle(const AVStream *st)
+{
+    const AVCodecDescriptor *d = avcodec_descriptor_get(st->codecpar->codec_id);
+    return d && (d->props & AV_CODEC_PROP_TEXT_SUB) && avcodec_find_decoder(st->codecpar->codec_id);
+}
+
 /* --- files on a network share -------------------------------------------- */
 
 static int net_read(void *opaque, uint8_t *buf, int size)
@@ -701,6 +870,20 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         if ((int)i != P.vidx && (int)i != P.aidx)
             P.fmt->streams[i]->discard = AVDISCARD_ALL;
 
+    /* The tracks the user can switch between. Subtitles start switched off. */
+    int audio_tracks[MAX_TRACKS], sub_tracks[MAX_TRACKS], n_audio = 0, n_subs = 0;
+    for (unsigned i = 0; i < P.fmt->nb_streams; i++) {
+        AVStream *t = P.fmt->streams[i];
+        if (t->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && n_audio < MAX_TRACKS &&
+            avcodec_find_decoder(t->codecpar->codec_id))
+            audio_tracks[n_audio++] = (int)i;
+        if (t->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE && n_subs < MAX_TRACKS && is_text_subtitle(t))
+            sub_tracks[n_subs++] = (int)i;
+    }
+    osd_log("%d audio track(s), %d subtitle track(s)", n_audio, n_subs);
+    P.aidx_want = P.aidx;
+    P.sidx = P.sidx_want = -1;
+
     pthread_create(&demux_t, NULL, demux_thread, NULL);
     pthread_create(&video_t, NULL, video_thread, NULL);
     if (P.aidx >= 0)
@@ -714,11 +897,14 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     double duration = P.fmt->duration > 0 ? (double)P.fmt->duration / AV_TIME_BASE : 0.0;
     double pos = NAN;                               /* last known position, stream time */
     double seek_goal = 0.0;
-    int seeking = 0, shown_serial = -1, bar_on = 0;
+    int seeking = 0, shown_serial = -1;
     int consecutive_drops = 0, shown_this_sec = 0, fps_now = 0;
     char stat_line[160] = "";
     int failed = 0, paused = 0;
     unsigned pad_prev = plat_pad();                 /* ignore buttons still held from the menu */
+    char note[200] = "", sub_text[900] = "";
+    uint64_t note_until = 0;
+    unsigned overlay_sig = 0;                       /* what was drawn over the last picture */
 
     for (;;) {
         QFrame qf = { 0 };
@@ -734,9 +920,49 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
 
         if (pressed & PAD_CIRCLE)
             break;
-        if (pressed & PAD_TRIANGLE) {
+        if (pressed & PAD_TRIANGLE)
             show_stats = !show_stats;
-            scaler.clear_pending = 2;               /* wipe the line off both buffers */
+
+        /* Square: next sound track. It takes effect through a seek to where we are. */
+        int audio_switch = -1;
+        if ((pressed & PAD_SQUARE) && !isnan(pos)) {
+            char label[120];
+            int cur = 0;
+            pthread_mutex_lock(&P.lock);
+            for (int i = 0; i < n_audio; i++)
+                if (audio_tracks[i] == P.aidx_want)
+                    cur = i;
+            pthread_mutex_unlock(&P.lock);
+            if (n_audio > 1 && P.aidx >= 0) {
+                cur = (cur + 1) % n_audio;
+                audio_switch = audio_tracks[cur];
+                track_label(audio_switch, label, sizeof(label));
+                snprintf(note, sizeof(note), " Audio %d/%d: %s ", cur + 1, n_audio, label);
+            } else {
+                snprintf(note, sizeof(note), " No other audio track ");
+            }
+            note_until = now + 3000000;
+        }
+
+        /* OPTIONS: next subtitle track, then off. */
+        if (pressed & PAD_OPTIONS) {
+            char label[120];
+            int cur = -1;
+            pthread_mutex_lock(&P.lock);
+            for (int i = 0; i < n_subs; i++)
+                if (sub_tracks[i] == P.sidx_want)
+                    cur = i;
+            cur = cur + 1 < n_subs ? cur + 1 : -1;
+            P.sidx_want = cur >= 0 ? sub_tracks[cur] : -1;
+            pthread_cond_broadcast(&P.cond);
+            pthread_mutex_unlock(&P.lock);
+            if (cur >= 0) {
+                track_label(sub_tracks[cur], label, sizeof(label));
+                snprintf(note, sizeof(note), " Subtitles %d/%d: %s ", cur + 1, n_subs, label);
+            } else {
+                snprintf(note, sizeof(note), n_subs ? " Subtitles off " : " No subtitles in this file ");
+            }
+            note_until = now + 3000000;
         }
         if (pressed & PAD_RIGHT) step += 10.0;
         if (pressed & PAD_LEFT)  step -= 10.0;
@@ -746,7 +972,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         if (pressed & PAD_L1)    step -= 600.0;
 
         int toggle_pause = (pressed & PAD_CROSS) != 0;
-        if (step != 0.0 && !isnan(pos)) {
+        if ((step != 0.0 || audio_switch >= 0) && !isnan(pos)) {
             double base = seeking ? seek_goal : pos;
             double target = base + step;
             if (duration > 0 && target > origin + duration - 5.0)
@@ -754,17 +980,20 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             if (target < origin)
                 target = origin;
 
-            if (fabs(target - base) > 0.5) {        /* not already at that end of the file */
+            if (fabs(target - base) > 0.5 || audio_switch >= 0) {   /* not already at that end of the file */
                 pthread_mutex_lock(&P.lock);
                 P.seek_target = target;
                 P.seek_from = base;
                 P.seek_req = 1;
+                if (audio_switch >= 0)
+                    P.aidx_want = audio_switch;
                 pthread_cond_broadcast(&P.cond);
                 pthread_mutex_unlock(&P.lock);
                 seeking = 1;
                 seek_goal = target;
             }
-            bar_until = now + 3000000;
+            if (step != 0.0)
+                bar_until = now + 3000000;
             if (paused)
                 toggle_pause = 1;                   /* jumping continues playback */
         }
@@ -870,9 +1099,30 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
                     plat_width(), plat_height());
         }
 
-        /* The bar may have been drawn on the black borders: wipe it when its time is up. */
-        if (bar_on && now >= bar_until) {
-            bar_on = 0;
+        /* Subtitle lines that belong to this moment. */
+        sub_text[0] = '\0';
+        pthread_mutex_lock(&P.lock);
+        for (int k = 0; k < CUE_CAP; k++) {
+            const Cue *cue = &P.cues[(P.cue_next + k) % CUE_CAP];       /* oldest first */
+            if (cue->text[0] && clock >= cue->start && clock < cue->end &&
+                strlen(sub_text) + strlen(cue->text) + 2 < sizeof(sub_text)) {
+                if (sub_text[0])
+                    strcat(sub_text, "\n");
+                strcat(sub_text, cue->text);
+            }
+        }
+        pthread_mutex_unlock(&P.lock);
+
+        /* Things drawn over the picture may reach into the black borders,
+         * where no new picture would cover them: wipe when they change. */
+        int bar_on = now < bar_until, note_on = now < note_until;
+        unsigned sig = (unsigned)bar_on | (unsigned)note_on << 1 | (unsigned)show_stats << 2;
+        for (const char *c = note_on ? note : ""; *c; c++)
+            sig = sig * 31 + (unsigned char)*c;
+        for (const char *c = sub_text; *c; c++)
+            sig = sig * 31 + (unsigned char)*c;
+        if (sig != overlay_sig) {
+            overlay_sig = sig;
             scaler.clear_pending = 2;
         }
 
@@ -911,10 +1161,14 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         }
         if (show_stats)
             osd_text(fb, W, H, W / 20, H / 20, stat_line, 0xFFFFFFFFu, 0xFF000000u);
-        if (now < bar_until) {
+        if (note_on)
+            osd_text(fb, W, H, W / 20, H / 20 + (show_stats ? osd_font_height() + 6 : 0), note,
+                     0xFFFFFFFFu, 0xFF101428u);
+        if (bar_on)
             draw_progress(fb, W, H, (seeking ? seek_goal : clock) - origin, duration);
-            bar_on = 1;
-        }
+        if (sub_text[0])
+            subfont_draw(fb, W, H, sub_text,
+                         H - H / 20 - (bar_on ? osd_font_height() + 34 + 12 : 0));
 
         plat_flip();
         st.seconds_played = clock - origin;
