@@ -20,309 +20,103 @@ Player refuses: MKV and other containers, decoded with FFmpeg.</p>
   <em>Main menu</em>
 </p>
 
-It is homebrew for consoles that can run fake-signed packages (for example
-with GoldHEN). *Mozi* is Hungarian for cinema; *Orbis* is the PS4's codename.
+Orbis Mozi plays your own video files on a PlayStation 4: from the console's
+disk, or straight from a shared folder on your home network. It needs a
+console that can run homebrew packages, for example with GoldHEN.
 
-> **Status: early.** Playback works and stays in sync. There is a menu with a
-> file list, pause, stop, seeking, audio track choice and text subtitles. See
-> the [changelog](CHANGELOG.md).
+*Mozi* is Hungarian for cinema; *Orbis* is the PS4's codename.
 
-## What works
+## What it does
 
-Tested on a PS4 Pro:
+- **Plays what the built-in Media Player refuses:** MKV, MP4, AVI, WebM, FLV
+  and more, with H.264, H.265, MPEG-4 (Xvid, DivX), MPEG-2, VP8 and VP9 video.
+- **Network shares:** plays directly from a Windows or Samba share (SMB2/SMB3),
+  with nothing to copy.
+- **Subtitles and audio tracks:** text subtitles inside the file (SRT, ASS),
+  with accented letters, and a choice between the file's audio tracks.
+- **The usual controls:** pause, jumps of 10 seconds and 10 minutes, and
+  volume up to 200%.
 
-| Source | Video | Audio | Result |
-|---|---|---|---|
-| SD episode | H.264 720x404, 1.8 Mbit/s | AAC stereo | full episode in sync |
-| 720p film | H.264 1280x720, 5.8 Mbit/s | AC3 5.1 | plays fine |
-| 1080p film | H.264 1920x1038, 14 Mbit/s | AC3 5.1 | 24 fps, 0 dropped frames |
+The full list of tested formats is in [What plays](docs/formats.md).
 
-### Tested codecs
+## Install
 
-All of these played on a PS4 Pro, each from a short test clip:
+1. Download the newest `OrbisMozi-x.y.z.pkg` from the
+   [releases](https://github.com/goph-R/OrbisMozi/releases/latest).
+2. Copy it to the console (USB drive or FTP) and install it with your package
+   installer. With GoldHEN: *Settings → Debug Settings → Game → Package Installer*.
+3. Start *Orbis Mozi* from the home screen.
 
-| Video | Tested as | Audio in the clip | Container |
-|---|---|---|---|
-| H.264 | 720p, 720p 60 fps, 1080p 18 Mbit/s | AAC, AC3 5.1 | MKV, MP4, FLV |
-| H.264 10-bit | 720p | AAC | MKV |
-| H.265 (HEVC) | 720p, 1080p | AAC | MKV |
-| H.265 10-bit | 1080p | AAC | MKV |
-| MPEG-4 (Xvid) | 624x352 | MP3 | AVI |
-| MPEG-4 (DivX 3) | 624x352 | MP3 | AVI |
-| MPEG-4 | 720p | AC3 | MKV |
-| MPEG-2 | DVD (PAL), 720p | AC3, MP2 | MPEG-PS, MPEG-TS |
-| VP9 | 720p, 1080p | Opus | WebM |
-| VP8 | 720p | Vorbis | WebM |
+## Getting videos to play
 
-| Audio | Tested as |
-|---|---|
-| AAC | stereo (48 kHz and 44.1 kHz) |
-| AC3 | stereo and 5.1 |
-| E-AC3 | 5.1 |
-| DTS | 5.1 |
-| FLAC | 5.1 |
-| MP3, MP2, Opus, Vorbis | stereo |
+Either way works, and you can use both.
 
-| Subtitles | Tested as |
-|---|---|
-| SubRip (SRT) | two tracks in one MKV, with accented letters |
-| ASS/SSA | one track in the same MKV (text only, styling is ignored) |
+### From a network share
 
-Also built in but not tried on the console yet: VC-1, WMV3, MJPEG and
-MPEG-1 video; TrueHD, WMA and PCM audio; MP4 timed text and WebVTT
-subtitles; the ASF/WMV and OGG containers.
+1. In the main menu choose **Add network share**.
+2. Fill in the server's IP address, the share's name, and the user and password
+   if the share needs a login.
+3. **Test connection** tells you whether it works. Then **Save**.
 
-Multichannel audio is mixed down to stereo.
+The share appears in the main menu as *Local network*. Square on it lets you
+change or delete it.
 
-- The screen runs at 1280x720 for sources up to 720p and switches to
-  1920x1080 for larger ones.
-- Files can be played from the console's disk or straight from a network
-  share (SMB2/SMB3). Tested with a Samba server: a 1080p film starts in
-  well under a second.
-- Decoding is done on the CPU. 4K and heavy H.265 files are not expected to
-  play smoothly.
+The server has to offer SMB2 or SMB3; the old SMB1 alone is not enough. The
+password is stored on the console as plain text.
 
-## Not there yet
+### From the console's disk
 
-- Picture-based subtitles (Blu-ray PGS, DVD) and separate `.srt` files
-- Remembering the preferred audio and subtitle language
-- A designed playback overlay and share form (only the menu and the file
-  list are designed so far)
+Copy videos into `/data/video` on the console, for example with GoldHEN's FTP
+server (port 2121). Subfolders are fine. They appear under *This console*.
 
-## Future improvements
+```sh
+curl -T film.mkv ftp://<ps4-ip>:2121/data/video/
+```
 
-Ideas that are not being worked on yet.
+USB drives cannot be read: a PS4 application is not allowed to see them.
 
-### Audio player
+## Controls
 
-Playing music files as well as videos. The decoders are already built in
-(MP3, FLAC, AAC/M4A, Ogg Vorbis, Opus, WAV, WMA), and audio output, volume,
-pause, seeking and network shares would work unchanged. What is missing:
-
-- An audio-only playback path: the player's main loop is driven by video
-  frames and refuses a file without video.
-- A "now playing" screen: title, artist and album from the file's tags, a
-  progress bar, and the embedded cover picture if there is one.
-- A playlist: next, previous and random within a folder, moving on by itself
-  when a track ends. The same mechanism would give "play the next episode"
-  for series.
-- Audio file types in the list, with their own icon.
-
-Not part of the idea: playing on while another application is in front (an
-application is suspended when it is left), and gapless playback between
-tracks.
-
-## Using it
-
-1. Build the package (see below) and install it with your package installer.
-2. Start *Orbis Mozi* once. It creates two folders on the console's disk:
-   `/data/video` for videos and `/data/orbismozi` for its settings.
-3. Give it something to play, either or both:
-   - **Copy videos to the console**, for example with GoldHEN's FTP server
-     (port 2121). Subfolders are fine.
-
-     ```sh
-     curl -T film.mkv ftp://<ps4-ip>:2121/data/video/
-     ```
-   - **Add a network share.** Choose "Add network share" in the menu
-     and fill in the server address, share name, user and password. "Test
-     connection" tells you whether it works before you save. Square on a
-     share in the list changes or deletes it.
-
-     The server has to offer SMB2 or SMB3; the old SMB1 protocol alone is
-     not enough. The password is stored on the console as plain text, in
-     `/data/orbismozi/shares.txt` (one `smb://user:password@server/share`
-     per line, which can also be edited by hand).
-4. Pick a video in the list.
-
-The app writes its log to `/data/orbismozi/log.txt` on every start, which is
-the thing to look at (or attach to a bug report) when something does not work.
-
-| Button | In the list | While playing |
+| Button | In the menu | While playing |
 |---|---|---|
-| D-pad up/down | move | volume up / down (0–200%) |
+| D-pad up/down | move | volume up / down |
 | D-pad left/right | page up / down | 10 seconds back / forward (hold to keep going) |
 | L1 / R1 | page up / down | 10 minutes back / forward |
 | Cross | open folder / play | pause, continue |
+| Circle | back | stop, return to the list |
 | Square | change or delete a share | next audio track |
 | OPTIONS | | next subtitle track, then off |
-| Circle | back | stop, return to the list |
 | Triangle | | show / hide the diagnostics line |
 | PS | | quit |
 
-Jumps land on the nearest key frame, so the distance is approximate. Changing
-the audio track also jumps back to the last key frame, a few seconds at most.
+## Good to know
 
-Subtitles: text tracks inside the file (SRT, ASS/SSA, MP4 timed text,
-WebVTT) are shown as plain text; styling and positioning are ignored.
+- **Tested on a PS4 Pro only.** Reports from other models are welcome.
+- 4K and heavy H.265 files are not expected to play smoothly.
+- Picture-based subtitles (Blu-ray, DVD) and separate `.srt` files are not
+  supported yet.
+- Surround sound is mixed down to stereo.
 
-**Why not a USB drive?** A PS4 application runs in a sandbox that does not
-contain the USB mount points, so the player cannot see them. `/data` is
-visible, which is why videos go there.
+**If something does not work**, the app writes a log to
+`/data/orbismozi/log.txt` on every start. Attach it when you
+[report a problem](https://github.com/goph-R/OrbisMozi/issues).
 
-The diagnostics line (triangle) shows the position, frames per second,
-dropped frames, the time spent converting each frame, and the offset between
-picture and sound.
+## More
 
-## Building
-
-Built and tested on Ubuntu 24.04 with clang 18.
-
-### 1. Tools
-
-`clang`, `lld`, `nasm`, `llvm-ar`, `make`, `cmake`, `git`, `curl`, and Python 3 with Pillow if
-you want to regenerate the fonts.
-
-```sh
-sudo apt install clang lld nasm llvm make curl cmake git
-```
-
-### 2. The OpenOrbis toolchain
-
-Everything is expected in one folder next to this repository:
-
-```
-PS4-Toolchain/
-  OpenOrbis/PS4Toolchain/     OpenOrbis release (headers, libraries, tools)
-  ffmpeg-ps4/                 FFmpeg for the PS4   (built in step 3)
-  ffmpeg-host/                FFmpeg for the PC    (built in step 3)
-  libsmb2-ps4/  libsmb2-host/ libsmb2              (built in step 4)
-OrbisMozi/                    this repository
-```
-
-```sh
-mkdir -p ../PS4-Toolchain && cd ../PS4-Toolchain
-curl -L -o oo.tar.gz \
-  https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz
-tar -xzf oo.tar.gz && rm oo.tar.gz
-```
-
-A different location works too: pass `PS4TC=/path/to/folder` to `make` and as
-the argument of the FFmpeg script.
-
-**libssl 1.1.** The toolchain's packaging tool (`PkgTool.Core`) needs OpenSSL
-1.1 and aborts with `No usable version of libssl was found` on current
-distributions. Unpack Ubuntu 20.04's `libssl1.1` package into
-`PS4-Toolchain/libssl11/`; the Makefile adds it to the library path for that
-one tool:
-
-```sh
-mkdir -p libssl11 && cd libssl11
-# take the newest libssl1.1_1.1.1f-1ubuntu2.NN_amd64.deb from
-#   http://security.ubuntu.com/ubuntu/pool/main/o/openssl/
-dpkg-deb -x libssl1.1_*.deb .
-```
-
-### 3. FFmpeg
-
-```sh
-tools/build-ffmpeg.sh
-```
-
-This downloads FFmpeg 7.1.1 and builds static libraries twice: for the PS4
-(`ffmpeg-ps4`) and for the PC (`ffmpeg-host`, used only for testing). The list
-of enabled formats is at the top of the script.
-
-### 4. libsmb2
-
-```sh
-tools/build-libsmb2.sh
-```
-
-This fetches libsmb2 7.0.0 (the SMB2/SMB3 client used for network shares) and
-builds it for the PS4 and the PC. It needs `cmake` and `git`.
-
-### 5. The package
-
-```sh
-make
-```
-
-The result is `IV0000-MOZI00001_00-ORBISMOZI0000000.pkg`.
-
-Three system files every package needs (`right.sprx`, `libc.prx`,
-`libSceFios2.prx`) are copied from the toolchain's samples during the build;
-they are not part of this repository.
-
-## Testing on the PC
-
-The player core does not depend on the console. `make host` builds it against
-a fake display and a fake audio device that consume frames and samples in real
-time, so decoding, timing and sync can be checked without a PS4:
-
-```sh
-make host
-build/player_host film.mkv 30        # play the first 30 seconds
-build/player_host smb://user:password@host/share/film.mkv 30
-```
-
-Without arguments it shows the file list, driven by a scripted controller.
-
-It prints the same log as the console build, ending with a summary line
-(frames shown, frames dropped, worst picture/sound offset). Useful variables:
-
-| Variable | Effect |
+| | |
 |---|---|
-| `PLAYER_DUMP_DIR=dir` | writes every 240th displayed frame there as a PPM image |
-| `PLAYER_WAV=file.wav` | writes the audio that would have been played |
-| `PLAYER_DUMP_EVERY=n` | write every nth frame instead |
-| `PLAYER_SIZE=1920x1080` | size of the fake screen at start |
-| `PLAYER_KEYS="d x 5000 o"` | scripted button presses: `u d l r` d-pad, `x o t` buttons, `L R` L1/R1, a number waits that many ms |
-| `MOZI_LOCAL=dir` | folder shown as the console's video folder |
-| `MOZI_SHARES=file` | shares file to read instead of `/data/orbismozi/shares.txt` |
-
-## How it works
-
-| File | Role |
-|---|---|
-| `src/player.c` | the player: demuxing, decoding, sync |
-| `src/plat.h` | the small interface the player needs from the machine |
-| `src/plat_ps4.c` | PS4 implementation: `sceVideoOut` frame buffers, `sceAudioOut` |
-| `host/plat_host.c` | PC implementation used by `make host` |
-| `src/osd.c` | on-screen text and log (errors are otherwise invisible on a console) |
-| `src/subfont.c` | the subtitle font: anti-aliased, accented letters, outlined |
-| `src/ui.c` | the menu's font, pictures and shapes (`src/uifont.bin`, `src/uiart.bin`; the pictures come from `assets/ui/` via `tools/mkuiart.py`) |
-| `src/smb.c` | network shares: folder listing and file reading through libsmb2 |
-| `src/browser.c` | the file list |
-| `src/shareform.c` | the form for adding or changing a network share |
-| `src/textinput.c` | text entry: the system keyboard, or a built-in one |
-| `src/main.c` | start-up and the loop: pick a file, play it, repeat |
-
-The mockups the menu screens are built from are in `design/` (layered PSD
-files at 1920x1080, drawn in PhotoCraft), together with the icon's source
-and the menu background as PNG, for use in mockups.
-
-Four threads: one reads packets from the file, one decodes video, one decodes
-audio and feeds the audio device, and the main thread shows each frame when the
-audio clock reaches its timestamp. Audio is the master clock, so picture and
-sound cannot drift apart. Frames that arrive more than 100 ms late are dropped
-so the picture can catch up.
-
-Frames are converted from YUV to RGB (and scaled, if needed) by libswscale
-directly into the frame buffer that is not on screen, then flipped at the next
-vertical sync.
+| [What plays](docs/formats.md) | every tested video, audio and subtitle format, and the limits |
+| [Changelog](CHANGELOG.md) | what changed in each version |
+| [Roadmap](docs/roadmap.md) | what is missing and what may come |
+| [Building](docs/building.md) | building the package yourself, and testing on a PC |
+| [How it works](docs/how-it-works.md) | the source files, the threads, the design sources |
+| [Licences and credits](docs/licences.md) | FFmpeg, libsmb2, fonts and the rest |
 
 ## Licence
 
-Orbis Mozi is released under the [MIT licence](LICENSE).
-
-It builds on other people's work, which keeps its own licences:
-
-- **FFmpeg** is linked statically and is licensed under the LGPL 2.1 or later
-  (the build script enables no GPL or non-free parts). If you distribute a
-  built package, the LGPL's terms apply to the FFmpeg part of it; the build
-  script and the sources here are what lets others rebuild it.
-- **libsmb2** is linked statically too and is also LGPL 2.1 or later; the
-  same applies to it.
-- **OpenOrbis PS4 Toolchain** (GPL 3.0) is used to build; its system files are
-  copied at build time and are not included here.
-- **DejaVu Sans Mono** is the source of the on-screen font in
-  `src/font_data.h` (generated by `tools/mkfont.py`), and **DejaVu Sans
-  Bold** of the subtitle font in `src/subfont.bin` (`tools/mksubfont.py`).
-- **Noto Sans** (SIL Open Font License 1.1) is the source of the menu font in
-  `src/uifont.bin` (also made by `tools/mksubfont.py`).
-- The two rings in the **icon** (`sce_sys/icon0.png`) are the logo of the
-  OpenOrbis project, used as a nod to the toolchain this is built with.
+Orbis Mozi is released under the [MIT licence](LICENSE). It contains FFmpeg
+and libsmb2 (both LGPL 2.1 or later) and is built with the OpenOrbis toolchain;
+the details are in [Licences and credits](docs/licences.md).
 
 This project is not affiliated with or endorsed by Sony Interactive
 Entertainment. "PlayStation" and "PS4" are trademarks of their owner. Use it
