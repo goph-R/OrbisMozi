@@ -59,7 +59,8 @@ The full list of tested formats is in [What plays](docs/formats.md).
 1. Download the newest `OrbisMozi-x.y.z.pkg` from the
    [releases](https://github.com/goph-R/OrbisMozi/releases/latest).
 2. Copy it to the console (USB drive or FTP) and install it with your package
-   installer. With GoldHEN: *Settings → Debug Settings → Game → Package Installer*.
+   installer. With GoldHEN: *GoldHEN → Debug Settings → Package Installer*. If
+   the `.pkg` is not in the list, set the *Package source* to *USB* or *All*.
 3. Start *Orbis Mozi* from the home screen.
 
 ## Getting videos to play
