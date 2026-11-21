@@ -289,7 +289,8 @@ It prints the same log as the console build, ending with a summary line
 | `src/main.c` | start-up and the loop: pick a file, play it, repeat |
 
 The mockups the menu screens are built from are in `design/` (layered PSD
-files at 1920x1080, drawn in PhotoCraft), together with the icon's source.
+files at 1920x1080, drawn in PhotoCraft), together with the icon's source
+and the menu background as PNG, for use in mockups.
 
 Four threads: one reads packets from the file, one decodes video, one decodes
 audio and feeds the audio device, and the main thread shows each frame when the
