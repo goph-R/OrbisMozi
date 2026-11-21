@@ -46,6 +46,11 @@ Network shares are kept in `/data/orbismozi/shares.txt`, one
 `smb://user:password@server/share` per line, with the password as plain text.
 The file can also be edited by hand.
 
+The video played last and its position are kept in
+`/data/orbismozi/resume.txt` (the position in seconds on the first line, the
+location without a share's password on the second). Only this one video is
+remembered; deleting the file forgets it.
+
 ## Why not a USB drive?
 
 A PS4 application runs in a sandbox that does not contain the USB mount

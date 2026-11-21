@@ -4,6 +4,26 @@ All notable changes to Orbis Mozi are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 numbers follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+First report from a base PS4: a 1080p H.264 film from a Samba share plays
+without dropped frames.
+
+### Added
+
+- A subtitle file beside the video (the same name with `.srt`) is loaded and
+  switched on. UTF-8, UTF-16 and Windows-1250 text are read.
+- The video played last continues where it was left when it is started
+  again; one that was seen to the end starts from the beginning.
+- While playing, any button shows an overlay with the position, the subtitle
+  and the audio track in use.
+- Circle pauses and opens a menu: continue, choose subtitles, choose audio,
+  picture, rewind, help and exit.
+- Picture modes: fit (the whole picture), fill (no borders, edges cut off)
+  and stretch.
+- The share form in its designed look, with a question before a share is
+  deleted.
+
 ## [0.1.0] - 2026-11-21
 
 The first public release.

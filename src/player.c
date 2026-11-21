@@ -29,7 +29,10 @@
 #include "plat.h"
 #include "player.h"
 #include "smb.h"
+#include "extsub.h"
+#include "menu.h"
 #include "subfont.h"
+#include "ui.h"
 
 #define PKTQ_CAP        2048
 #define PKTQ_ENOUGH     48                  /* packets per stream considered "full" */
@@ -42,6 +45,7 @@
 #define NET_BUFFER      (256 * 1024)        /* read-ahead for files on a share */
 #define CUE_CAP         256                 /* subtitle lines kept ready, all tracks together */
 #define MAX_TRACKS      32
+#define RESUME_MARGIN   15.0                /* seconds: no continuing this close to either end */
 
 typedef struct {
     AVPacket *pkt[PKTQ_CAP];
@@ -62,6 +66,10 @@ typedef struct {
 } Cue;
 
 static int g_volume = 100;              /* percent, 0..200; kept between files */
+
+/* How the picture is put on the screen; kept between files. */
+enum { PICTURE_FIT, PICTURE_FILL, PICTURE_STRETCH };
+static int g_picture = PICTURE_FIT;
 
 static struct {
     AVFormatContext *fmt;
@@ -580,6 +588,8 @@ typedef struct {
     struct SwsContext *sws;
     int src_w, src_h, src_fmt;
     int dst_x, dst_y, dst_w, dst_h;
+    int mode;                           /* the PICTURE_* it was set up for */
+    int crop_x, crop_y, crop_w, crop_h; /* the part of the source that is shown */
     int clear_pending;                  /* buffers that still need black borders */
 } Scaler;
 
@@ -600,8 +610,39 @@ static int scaler_setup(Scaler *s, const AVFrame *f, AVRational stream_sar)
     dw &= ~1;
     dh &= ~1;
 
+    /* Fit shows the whole picture with black borders; stretch fills the
+     * screen and bends the picture; fill keeps the shape and cuts off what
+     * does not fit, the same amount on both sides. */
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
+    int cx = 0, cy = 0, cw = f->width, ch = f->height;
+    s->mode = g_picture;
+    if (s->mode != PICTURE_FIT) {
+        dw = W;
+        dh = H;
+    }
+    if (s->mode == PICTURE_FILL && desc && !(desc->flags & (AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_HWACCEL))) {
+        double screen = (double)W / H;
+        int ax = 1 << desc->log2_chroma_w, ay = 1 << desc->log2_chroma_h;
+        if (aspect > screen)
+            cw = (int)lrint(f->width * screen / aspect);
+        else
+            ch = (int)lrint(f->height * aspect / screen);
+        cw = cw / (2 * ax) * (2 * ax);              /* whole colour samples, and an even size */
+        ch = ch / (2 * ay) * (2 * ay);
+        if (cw < 16 || ch < 16) {
+            cw = f->width;
+            ch = f->height;
+        }
+        cx = (f->width - cw) / 2 / ax * ax;
+        cy = (f->height - ch) / 2 / ay * ay;
+    }
+    s->crop_x = cx;
+    s->crop_y = cy;
+    s->crop_w = cw;
+    s->crop_h = ch;
+
     sws_freeContext(s->sws);
-    s->sws = sws_getContext(f->width, f->height, f->format, dw, dh, AV_PIX_FMT_BGRA,
+    s->sws = sws_getContext(cw, ch, f->format, dw, dh, AV_PIX_FMT_BGRA,
                             SWS_BILINEAR, NULL, NULL, NULL);
     if (!s->sws) {
         osd_log("cannot set up picture conversion for %s", av_get_pix_fmt_name(f->format));
@@ -657,32 +698,47 @@ static void format_time(char *out, size_t out_size, double seconds)
     snprintf(out, out_size, "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60);
 }
 
-/* Position bar near the bottom of the picture. duration <= 0: unknown. */
-static void draw_progress(uint32_t *fb, int W, int H, double position, double duration)
-{
-    int fh = osd_font_height(), fw = osd_font_width();
-    int x = W / 20, w = W - 2 * x;
-    int box_h = fh + 34, y = H - H / 20 - box_h;
-    const uint32_t bg = 0xFF101428u;
-    char a[32], b[32], text[80];
+/* --- the overlay: what any button press brings up over the picture ---------- */
 
-    format_time(a, sizeof(a), position);
-    if (duration > 0) {
-        format_time(b, sizeof(b), duration);
-        snprintf(text, sizeof(text), "%s / %s", a, b);
-    } else {
-        snprintf(text, sizeof(text), "%s", a);
+static int overlay_height(int H) { return H * 120 / 720; }
+
+/* A strip at the bottom that fades in from nothing, with the subtitle and
+ * sound track in use and the position in the film. duration <= 0: unknown. */
+static void draw_overlay(uint32_t *fb, int W, int H, double position, double duration,
+                         const char *sub_name, const char *audio_name)
+{
+    int font = H >= 1000 ? UI_FONT_TEXT : UI_FONT_SMALL;
+    int hh = overlay_height(H), y0 = H - hh, mx = W / 20;
+    int line1 = y0 + hh * 52 / 120, line2 = y0 + hh * 92 / 120;
+    char a[32], b[32] = "", left[200], right[200], fitted[200];
+
+    for (int row = 0; row < hh; row++) {            /* eased: soft at the top, 80% black at the bottom */
+        double t = (double)(row + 1) / hh;
+        ui_dim(fb, W, H, 0, y0 + row, W, 1, 256 - (int)(205.0 * t * t * (3.0 - 2.0 * t)));
     }
 
-    osd_fill(fb, W, H, x, y, w, box_h, bg);
-    osd_text(fb, W, H, x + 2 * fw, y + 8, text, 0xFFFFFFFFu, bg);
+    snprintf(left, sizeof(left), "Subtitles: %s", sub_name);
+    snprintf(right, sizeof(right), "Audio: %s", audio_name);
+    ui_fit(font, left, W / 2 - mx - 20, fitted, sizeof(fitted));
+    ui_text(fb, W, H, mx, line1, font, fitted, 0xFFFFFFFFu);
+    ui_fit(font, right, W / 2 - mx - 20, fitted, sizeof(fitted));
+    ui_text(fb, W, H, W - mx - ui_text_width(font, fitted), line1, font, fitted, 0xFFFFFFFFu);
+
+    if (position < 0)
+        position = 0;
+    format_time(a, sizeof(a), position);
+    ui_text(fb, W, H, mx, line2, font, a, 0xFFFFFFFFu);
     if (duration > 0) {
-        int bar_w = w - 4 * fw;
+        format_time(b, sizeof(b), duration);
+        int tw = ui_text_width(font, b), gap = H * 18 / 720, bar_h = H >= 1000 ? 6 : 4;
+        int bx = mx + ui_text_width(font, "0:00:00") + gap, bw = W - mx - tw - gap - bx;
+        int by = line2 - (H >= 1000 ? 12 : 8);
         double part = position / duration;
-        if (part < 0) part = 0;
         if (part > 1) part = 1;
-        osd_fill(fb, W, H, x + 2 * fw, y + fh + 16, bar_w, 8, 0xFF404860u);
-        osd_fill(fb, W, H, x + 2 * fw, y + fh + 16, (int)(bar_w * part), 8, 0xFF4F8FFFu);
+        ui_text(fb, W, H, W - mx - tw, line2, font, b, 0xFFFFFFFFu);
+        ui_dim(fb, W, H, bx, by, bw, bar_h, 90);
+        osd_fill(fb, W, H, bx, by, bw, bar_h, 0xFF5A5F6Eu);
+        osd_fill(fb, W, H, bx, by, (int)(bw * part), bar_h, 0xFFFFFFFFu);
     }
 }
 
@@ -700,23 +756,6 @@ static void log_to_screen(void *avcl, int level, const char *fmt, va_list ap)
         shown++;
         osd_log("ffmpeg: %s", line);
     }
-}
-
-/* Describes a track for the on-screen note, e.g. "hun - Hun Full (subrip)". */
-static void track_label(int stream, char *out, size_t out_size)
-{
-    AVStream *st = P.fmt->streams[stream];
-    AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", NULL, 0);
-    AVDictionaryEntry *title = av_dict_get(st->metadata, "title", NULL, 0);
-    char detail[64];
-
-    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
-        snprintf(detail, sizeof(detail), "%s, %d ch", avcodec_get_name(st->codecpar->codec_id),
-                 st->codecpar->ch_layout.nb_channels);
-    else
-        snprintf(detail, sizeof(detail), "%s", avcodec_get_name(st->codecpar->codec_id));
-    snprintf(out, out_size, "%s%s%s (%s)", lang ? lang->value : "", lang && title ? " - " : "",
-             title ? title->value : lang ? "" : "unnamed", detail);
 }
 
 /* Text subtitles only: pictures (Blu-ray, DVD) cannot be drawn yet. */
@@ -786,6 +825,204 @@ static void close_input(SmbFile *net)
         avio_context_free(&io);
     }
     smb_close(net);
+}
+
+/* --- track names ------------------------------------------------------------ */
+
+static const char *language_name(const char *code)
+{
+    static const char *const known[][2] = {
+        { "eng", "English" }, { "hun", "Hungarian" }, { "ger", "German" }, { "deu", "German" },
+        { "fre", "French" }, { "fra", "French" }, { "spa", "Spanish" }, { "ita", "Italian" },
+        { "dut", "Dutch" }, { "nld", "Dutch" }, { "pol", "Polish" }, { "por", "Portuguese" },
+        { "rus", "Russian" }, { "ukr", "Ukrainian" }, { "cze", "Czech" }, { "ces", "Czech" },
+        { "slo", "Slovak" }, { "slk", "Slovak" }, { "rum", "Romanian" }, { "ron", "Romanian" },
+        { "swe", "Swedish" }, { "nor", "Norwegian" }, { "dan", "Danish" }, { "fin", "Finnish" },
+        { "gre", "Greek" }, { "ell", "Greek" }, { "tur", "Turkish" }, { "jpn", "Japanese" },
+        { "chi", "Chinese" }, { "zho", "Chinese" }, { "kor", "Korean" }, { "vie", "Vietnamese" },
+        { "hrv", "Croatian" }, { "srp", "Serbian" }, { "slv", "Slovenian" }, { "bul", "Bulgarian" },
+    };
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        if (strcmp(code, known[i][0]) == 0)
+            return known[i][1];
+    return code;
+}
+
+/* A track as a person would name it: "English · AC3 5.1", "Hungarian · Forced". */
+static void track_name(int stream, char *out, size_t out_size)
+{
+    AVStream *st = P.fmt->streams[stream];
+    AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", NULL, 0);
+    AVDictionaryEntry *title = av_dict_get(st->metadata, "title", NULL, 0);
+    const char *name = lang && strcmp(lang->value, "und") != 0 ? language_name(lang->value) : NULL;
+    char detail[80] = "";
+
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        int ch = st->codecpar->ch_layout.nb_channels;
+        char codec[32];
+        snprintf(codec, sizeof(codec), "%s", avcodec_get_name(st->codecpar->codec_id));
+        for (char *c = codec; *c; c++)
+            if (*c >= 'a' && *c <= 'z')
+                *c -= 32;
+        snprintf(detail, sizeof(detail), "%s %s", codec,
+                 ch == 1 ? "mono" : ch == 2 ? "stereo" : ch == 6 ? "5.1" : ch == 8 ? "7.1" : "multichannel");
+    } else if (title) {
+        snprintf(detail, sizeof(detail), "%s", title->value);
+    }
+    if (name && detail[0])
+        snprintf(out, out_size, "%s \xC2\xB7 %s", name, detail);
+    else
+        snprintf(out, out_size, "%s", name ? name : detail[0] ? detail : "Unnamed");
+}
+
+/* --- the pause menu ------------------------------------------------------------ */
+
+typedef struct {
+    int       *sub_sel;                 /* -1 = off, 0 = the subtitle file if there is one, then the tracks */
+    int        have_ext, n_subs, n_audio;
+    const int *sub_tracks, *audio_tracks;
+    int        audio_now;               /* the sound track in use (stream index) */
+    int        audio_pick;              /* out: the sound track asked for, -1 = no change */
+    int        rewind, leave;           /* out */
+} PauseMenu;
+
+/* Stops the film, shows the menu over `frame` (the screen as it is; NULL:
+ * black) and starts the film again. Returns how long that took, in
+ * microseconds: the clocks stood still meanwhile. */
+static uint64_t pause_menu(PauseMenu *m, const uint32_t *frame)
+{
+    static const char *const MAIN[] = { "Continue", "Subtitles", "Audio", "Picture", "Rewind", "Help", "Exit" };
+    static const char *const PICTURE[] = { "Fit: the whole picture", "Fill: no borders, edges cut off",
+                                           "Stretch: no borders, shape changed" };
+    static const char *const KEYS[] = { "D-pad left / right", "L1 / R1", "D-pad up / down", "Circle",
+                                        "Square", "OPTIONS", "Triangle" };
+    static const char *const DOES[] = { "10 seconds back / forward", "10 minutes back / forward", "Volume",
+                                        "Pause, this menu", "Next audio track", "Next subtitle",
+                                        "Diagnostics line" };
+    int W = plat_width(), H = plat_height(), sel = 0;
+    uint64_t t0 = plat_time_us();
+    uint32_t *still = malloc((size_t)W * H * sizeof(*still));
+    char labels[MAX_TRACKS + 2][160];
+    const char *items[MAX_TRACKS + 2];
+
+    m->audio_pick = -1;
+    m->rewind = m->leave = 0;
+    if (!still)
+        return 0;
+    if (frame) {
+        memcpy(still, frame, (size_t)W * H * sizeof(*still));
+        ui_dim(still, W, H, 0, 0, W, H, 110);
+    } else {
+        for (size_t i = 0; i < (size_t)W * H; i++)
+            still[i] = 0xFF000000u;
+    }
+
+    pthread_mutex_lock(&P.lock);
+    P.paused = 1;
+    pthread_cond_broadcast(&P.cond);
+    pthread_mutex_unlock(&P.lock);
+
+    for (;;) {
+        int n = 0, cur = 0, pick = menu_pick(still, "Paused", MAIN, 7, sel);
+
+        if (pick <= 0)                              /* Continue, or circle */
+            break;
+        sel = pick;
+        if (pick == 1) {                            /* Subtitles */
+            snprintf(labels[n++], sizeof(labels[0]), "No subtitle");
+            if (m->have_ext)
+                snprintf(labels[n++], sizeof(labels[0]), "Subtitle file");
+            for (int i = 0; i < m->n_subs; i++)
+                track_name(m->sub_tracks[i], labels[n++], sizeof(labels[0]));
+            for (int i = 0; i < n; i++)
+                items[i] = labels[i];
+            pick = menu_pick(still, "Subtitles", items, n, *m->sub_sel + 1);
+            if (pick >= 0) {
+                *m->sub_sel = pick - 1;
+                sel = 0;
+            }
+        } else if (pick == 2) {                     /* Audio */
+            int now_stream = m->audio_pick >= 0 ? m->audio_pick : m->audio_now;
+            for (int i = 0; i < m->n_audio; i++) {
+                track_name(m->audio_tracks[i], labels[n], sizeof(labels[0]));
+                if (m->audio_tracks[i] == now_stream)
+                    cur = n;
+                n++;
+            }
+            if (n == 0)
+                snprintf(labels[n++], sizeof(labels[0]), "No audio in this file");
+            for (int i = 0; i < n; i++)
+                items[i] = labels[i];
+            pick = menu_pick(still, "Audio", items, n, cur);
+            if (pick >= 0) {
+                if (m->n_audio > 0 && m->audio_now >= 0)
+                    m->audio_pick = m->audio_tracks[pick] != m->audio_now ? m->audio_tracks[pick] : -1;
+                sel = 0;
+            }
+        } else if (pick == 3) {                     /* Picture; the film shows it once it runs again */
+            pick = menu_pick(still, "Picture", PICTURE, 3, g_picture);
+            if (pick >= 0) {
+                g_picture = pick;
+                sel = 0;
+            }
+        } else if (pick == 4) {                     /* Rewind: from the start, and on with the film */
+            m->rewind = 1;
+            break;
+        } else if (pick == 5) {
+            menu_table(still, "Help", KEYS, DOES, 7);
+        } else {                                    /* Exit */
+            m->leave = 1;
+            break;
+        }
+    }
+    free(still);
+
+    uint64_t t1 = plat_time_us();
+    pthread_mutex_lock(&P.lock);
+    P.paused = 0;
+    P.aclock_time = t1;                             /* the audio clock stood still meanwhile */
+    pthread_cond_broadcast(&P.cond);
+    pthread_mutex_unlock(&P.lock);
+    return t1 - t0;
+}
+
+/* --- continuing where the last video was left ----------------------------- */
+
+/* One file, one video: only the video played last is remembered. The first
+ * line is the position in seconds, the second the video's location (without
+ * the password of a share). */
+static const char *resume_file(void)
+{
+    const char *env = getenv("MOZI_RESUME");
+    return env ? env : "/data/orbismozi/resume.txt";
+}
+
+/* The position stored for this video, or 0 if it is not the one stored. */
+static double resume_read(const char *name)
+{
+    char line[1100];
+    double seconds = 0.0;
+    FILE *f = fopen(resume_file(), "r");
+
+    if (!f)
+        return 0.0;
+    if (fgets(line, sizeof(line), f))
+        seconds = atof(line);
+    if (!fgets(line, sizeof(line), f))
+        seconds = 0.0;
+    fclose(f);
+    line[strcspn(line, "\r\n")] = '\0';
+    return strcmp(line, name) == 0 && seconds > 0.0 ? seconds : 0.0;
+}
+
+static void resume_write(const char *name, double seconds)
+{
+    FILE *f = fopen(resume_file(), "w");
+
+    if (!f)
+        return;
+    fprintf(f, "%.1f\n%s\n", seconds, name);
+    fclose(f);
 }
 
 /* --- main entry --------------------------------------------------------- */
@@ -887,7 +1124,29 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     }
     osd_log("%d audio track(s), %d subtitle track(s)", n_audio, n_subs);
     P.aidx_want = P.aidx;
-    int sub_sel = -1;                               /* index into sub_tracks, -1 = off */
+
+    /* A subtitle file beside the video comes first and is switched on:
+     * whoever put it there wants it. The tracks inside the file follow. */
+    ExtSub ext_sub;
+    int have_ext = extsub_load(path, &ext_sub) == 0;
+    int sub_total = n_subs + have_ext;
+    int sub_sel = have_ext ? 0 : -1;                /* 0 = the file if there is one, then sub_tracks; -1 = off */
+
+    /* The video that was left last time continues where it was; the start
+     * and the last moments of a film are not worth going back to. */
+    char resume_name[1024];
+    double file_start = P.fmt->start_time != AV_NOPTS_VALUE ? (double)P.fmt->start_time / AV_TIME_BASE : 0.0;
+    double file_length = P.fmt->duration > 0 ? (double)P.fmt->duration / AV_TIME_BASE : 0.0;
+    smb_display_name(path, resume_name, sizeof(resume_name));
+    double resume_at = max_seconds > 0 ? 0.0 : resume_read(resume_name);
+    if (resume_at < RESUME_MARGIN || (file_length > 0 && resume_at > file_length - RESUME_MARGIN))
+        resume_at = 0.0;
+    if (resume_at > 0.0) {                          /* the demux thread starts with this jump */
+        P.seek_target = file_start + resume_at;
+        P.seek_from = P.seek_target + 1.0;          /* "backwards": land before the place, not after it */
+        P.seek_req = 1;
+        osd_log("continuing at %.0f s", resume_at);
+    }
 
     pthread_create(&demux_t, NULL, demux_thread, NULL);
     pthread_create(&video_t, NULL, video_thread, NULL);
@@ -908,17 +1167,32 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     int failed = 0, paused = 0;
     unsigned pad_prev = plat_pad();                 /* ignore buttons still held from the menu */
     char note[200] = "", sub_text[900] = "";
-    uint64_t note_until = 0, repeat_at = 0;
+
+    uint64_t note_until = 0, repeat_at = 0, resume_saved = 0;
+    int ended = 0;                                  /* played to the end, not stopped */
+
+    if (resume_at > 0.0) {                          /* say so, and show where that is */
+        char at[32];
+        format_time(at, sizeof(at), resume_at);
+        snprintf(note, sizeof(note), " Continuing from %s ", at);
+        note_until = bar_until = plat_time_us() + 4000000;
+        seeking = 1;
+        seek_goal = file_start + resume_at;
+    }
     unsigned overlay_sig = 0;                       /* what was drawn over the last picture */
+    uint64_t menu_wanted = 0;                       /* when circle was pressed; 0 = not */
+    PauseMenu menu = { .sub_sel = &sub_sel, .have_ext = have_ext, .n_subs = n_subs, .n_audio = n_audio,
+                       .sub_tracks = sub_tracks, .audio_tracks = audio_tracks, .audio_pick = -1 };
 
     for (;;) {
         QFrame qf = { 0 };
         int have, done, serial_now, seek_pending;
         uint64_t now = plat_time_us();
 
-        /* Controller: circle stops, cross pauses and continues, d-pad
-         * left/right and L1/R1 jump, d-pad up/down is the volume, square
-         * and OPTIONS change tracks, triangle shows the diagnostics line. */
+        /* Controller: circle pauses and opens the menu, d-pad left/right and
+         * L1/R1 jump, d-pad up/down is the volume, square and OPTIONS change
+         * tracks, triangle shows the diagnostics line. Every button brings
+         * the overlay up for a few seconds. */
         unsigned pad = plat_pad();
         unsigned pressed = pad & ~pad_prev;
         double step = 0.0;
@@ -932,15 +1206,16 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         }
         pad_prev = pad;
 
-        if (pressed & PAD_CIRCLE)
-            break;
+        if (pressed)                                /* any button brings the overlay up */
+            bar_until = now + 3000000;
+        if ((pressed & PAD_CIRCLE) && !menu_wanted)
+            menu_wanted = now;                      /* opens over the next picture */
         if (pressed & PAD_TRIANGLE)
             show_stats = !show_stats;
 
         /* Square: next sound track. It takes effect through a seek to where we are. */
         int audio_switch = -1;
         if ((pressed & PAD_SQUARE) && !isnan(pos)) {
-            char label[120];
             int cur = 0;
             pthread_mutex_lock(&P.lock);
             for (int i = 0; i < n_audio; i++)
@@ -950,26 +1225,16 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             if (n_audio > 1 && P.aidx >= 0) {
                 cur = (cur + 1) % n_audio;
                 audio_switch = audio_tracks[cur];
-                track_label(audio_switch, label, sizeof(label));
-                snprintf(note, sizeof(note), " Audio %d/%d: %s ", cur + 1, n_audio, label);
-            } else {
-                snprintf(note, sizeof(note), " No other audio track ");
             }
-            note_until = now + 3000000;
+        }
+        if (menu.audio_pick >= 0) {                 /* chosen in the pause menu */
+            audio_switch = menu.audio_pick;
+            menu.audio_pick = -1;
         }
 
         /* OPTIONS: next subtitle track, then off. */
-        if (pressed & PAD_OPTIONS) {
-            char label[120];
-            sub_sel = sub_sel + 1 < n_subs ? sub_sel + 1 : -1;
-            if (sub_sel >= 0) {
-                track_label(sub_tracks[sub_sel], label, sizeof(label));
-                snprintf(note, sizeof(note), " Subtitles %d/%d: %s ", sub_sel + 1, n_subs, label);
-            } else {
-                snprintf(note, sizeof(note), n_subs ? " Subtitles off " : " No subtitles in this file ");
-            }
-            note_until = now + 3000000;
-        }
+        if (pressed & PAD_OPTIONS)
+            sub_sel = sub_sel + 1 < sub_total ? sub_sel + 1 : -1;
         if (pressed & PAD_RIGHT) step += 10.0;
         if (pressed & PAD_LEFT)  step -= 10.0;
         if (pressed & (PAD_UP | PAD_DOWN)) {        /* volume; above 100% boosts quiet films */
@@ -981,8 +1246,26 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         }
         if (pressed & PAD_R1)    step += 600.0;
         if (pressed & PAD_L1)    step -= 600.0;
+        if (menu.rewind) {                          /* chosen in the pause menu: back to the start */
+            step = -1e9;
+            menu.rewind = 0;
+        }
 
-        int toggle_pause = (pressed & PAD_CROSS) != 0;
+        /* No picture arrives (the end of the file, a slow share): the menu
+         * does not wait for one for ever. */
+        if (menu_wanted && now - menu_wanted > 700000) {
+            menu_wanted = 0;
+            menu.audio_now = P.aidx_want;
+            wall_start += pause_menu(&menu, NULL);
+            if (menu.leave)
+                break;
+            pad_prev = plat_pad();
+            bar_until = plat_time_us() + 3000000;
+            scaler.clear_pending = 2;
+            continue;
+        }
+
+        int toggle_pause = 0;
         if ((step != 0.0 || audio_switch >= 0) && !isnan(pos)) {
             double base = seeking ? seek_goal : pos;
             double target = base + step;
@@ -1036,8 +1319,10 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         pthread_mutex_unlock(&P.lock);
 
         if (!have) {
-            if (done)
+            if (done) {
+                ended = 1;
                 break;
+            }
             plat_sleep_us(2000);
             continue;
         }
@@ -1099,7 +1384,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
 
         AVFrame *f = qf.frame;
         if (!scaler.sws || f->width != scaler.src_w || f->height != scaler.src_h ||
-            f->format != scaler.src_fmt) {
+            f->format != scaler.src_fmt || scaler.mode != g_picture) {
             if (scaler_setup(&scaler, f, vst->sample_aspect_ratio) < 0) {
                 av_frame_free(&qf.frame);
                 failed = 1;
@@ -1112,10 +1397,22 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
 
         /* Subtitle lines that belong to this moment. */
         sub_text[0] = '\0';
+        if (have_ext && sub_sel == 0) {             /* the file counts from the start of the video */
+            double t = clock - (isnan(origin) ? 0.0 : origin);
+            for (int k = 0; k < ext_sub.count; k++) {
+                const ExtCue *cue = &ext_sub.cues[k];
+                if (t >= cue->start && t < cue->end &&
+                    strlen(sub_text) + strlen(cue->text) + 2 < sizeof(sub_text)) {
+                    if (sub_text[0])
+                        strcat(sub_text, "\n");
+                    strcat(sub_text, cue->text);
+                }
+            }
+        }
         pthread_mutex_lock(&P.lock);
         for (int k = 0; k < CUE_CAP; k++) {
             const Cue *cue = &P.cues[(P.cue_next + k) % CUE_CAP];       /* oldest first */
-            if (sub_sel >= 0 && cue->stream == sub_tracks[sub_sel] &&
+            if (sub_sel >= have_ext && cue->stream == sub_tracks[sub_sel - have_ext] &&
                 cue->text[0] && clock >= cue->start && clock < cue->end &&
                 strlen(sub_text) + strlen(cue->text) + 2 < sizeof(sub_text)) {
                 if (sub_text[0])
@@ -1133,7 +1430,8 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             sig = sig * 31 + (unsigned char)*c;
         for (const char *c = sub_text; *c; c++)
             sig = sig * 31 + (unsigned char)*c;
-        if (sig != overlay_sig) {
+        sig = sig * 31 + (unsigned)(sub_sel + 1) * 64 + (unsigned)P.aidx_want;
+        if (sig != overlay_sig || menu_wanted) {
             overlay_sig = sig;
             scaler.clear_pending = 2;
         }
@@ -1145,11 +1443,24 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
                 fb[i] = 0xFF000000u;
             scaler.clear_pending--;
         }
+        if (bar_on)                                 /* the strip's text changes: fresh black under it, outside the picture */
+            osd_fill(fb, W, H, 0, H - overlay_height(H), W, overlay_height(H), 0xFF000000u);
 
         uint64_t t0 = plat_time_us();
         uint8_t *dst[4] = { (uint8_t *)(fb + (size_t)scaler.dst_y * W + scaler.dst_x), NULL, NULL, NULL };
         int dst_stride[4] = { W * 4, 0, 0, 0 };
-        sws_scale(scaler.sws, (const uint8_t * const *)f->data, f->linesize, 0, f->height, dst, dst_stride);
+        const uint8_t *src[4] = { f->data[0], f->data[1], f->data[2], f->data[3] };
+        if (scaler.crop_x || scaler.crop_y) {       /* start each plane at the corner of the part shown */
+            const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
+            for (int c = 0; desc && c < desc->nb_components; c++) {
+                int pl = desc->comp[c].plane, chroma = pl == 1 || pl == 2;
+                if (desc->comp[c].offset == 0 && f->data[pl])
+                    src[pl] = f->data[pl]
+                            + (size_t)(scaler.crop_y >> (chroma ? desc->log2_chroma_h : 0)) * f->linesize[pl]
+                            + (size_t)(scaler.crop_x >> (chroma ? desc->log2_chroma_w : 0)) * desc->comp[c].step;
+            }
+        }
+        sws_scale(scaler.sws, src, f->linesize, 0, scaler.crop_h, dst, dst_stride);
         double conv_ms = (double)(plat_time_us() - t0) / 1000.0;
         convert_total += conv_ms;
         av_frame_free(&qf.frame);
@@ -1171,19 +1482,53 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
                      secs / 3600, secs / 60 % 60, secs % 60, fps_now, st.frames_dropped,
                      conv_ms, last_diff * 1000.0);
         }
+        if (menu_wanted) {                          /* the menu stands on this picture, with its subtitle */
+            menu_wanted = 0;
+            if (sub_text[0])
+                subfont_draw(fb, W, H, sub_text, H - H / 20);
+            menu.audio_now = P.aidx_want;
+            wall_start += pause_menu(&menu, fb);
+            if (menu.leave)
+                break;
+            pad_prev = plat_pad();
+            bar_until = plat_time_us() + 3000000;
+            scaler.clear_pending = 2;
+            overlay_sig = ~0u;
+            continue;
+        }
+
         if (show_stats)
             osd_text(fb, W, H, W / 20, H / 20, stat_line, 0xFFFFFFFFu, 0xFF000000u);
         if (note_on)
             osd_text(fb, W, H, W / 20, H / 20 + (show_stats ? osd_font_height() + 6 : 0), note,
                      0xFFFFFFFFu, 0xFF101428u);
-        if (bar_on)
-            draw_progress(fb, W, H, (seeking ? seek_goal : clock) - origin, duration);
+        if (bar_on) {
+            char sub_name[160] = "No subtitle", audio_name[160] = "No audio";
+            if (have_ext && sub_sel == 0)
+                snprintf(sub_name, sizeof(sub_name), "Subtitle file");
+            else if (sub_sel >= 0)
+                track_name(sub_tracks[sub_sel - have_ext], sub_name, sizeof(sub_name));
+            if (P.aidx_want >= 0)
+                track_name(P.aidx_want, audio_name, sizeof(audio_name));
+            draw_overlay(fb, W, H, (seeking ? seek_goal : clock) - origin, duration, sub_name, audio_name);
+        }
         if (sub_text[0])
-            subfont_draw(fb, W, H, sub_text,
-                         H - H / 20 - (bar_on ? osd_font_height() + 34 + 12 : 0));
+            subfont_draw(fb, W, H, sub_text, bar_on ? H - overlay_height(H) : H - H / 20);
 
         plat_flip();
         st.seconds_played = clock - origin;
+
+        if (now - resume_saved > 15000000 && !isnan(pos) && max_seconds <= 0) {    /* also survives a closed application */
+            resume_saved = now;
+            resume_write(resume_name, pos - file_start);
+        }
+    }
+
+    if (max_seconds <= 0 && !failed) {
+        double at = isnan(pos) ? 0.0 : (seeking ? seek_goal : pos) - file_start;
+        if (ended || (file_length > 0 && at > file_length - RESUME_MARGIN))
+            at = 0.0;                               /* seen to the end: next time from the start */
+        resume_write(resume_name, at);
     }
 
     /* --- shutdown --- */
@@ -1209,6 +1554,8 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     avcodec_free_context(&P.adec);
     for (int k = 0; k < P.n_sdec; k++)
         avcodec_free_context(&P.sdec[k]);
+    if (have_ext)
+        extsub_free(&ext_sub);
     close_input(net);
     pthread_mutex_destroy(&P.lock);
     pthread_cond_destroy(&P.cond);

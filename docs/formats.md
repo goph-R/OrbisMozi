@@ -1,7 +1,9 @@
 # What plays
 
 Everything here was tried on a PS4 Pro. Decoding is done on the CPU, so the
-limits depend on the console: nothing has been measured on a base PS4 yet.
+limits depend on the console. On a base PS4 one report exists so far: a 1080p
+H.264 film from a Samba share played with no dropped frames (2.8 ms per frame
+for conversion, picture and sound 4 ms apart).
 
 ## Tested formats
 
@@ -54,8 +56,12 @@ A 1080p film from a network share (Samba) starts in well under a second.
 ## Limits
 
 - 4K and heavy H.265 files are not expected to play smoothly.
-- Picture-based subtitles (Blu-ray PGS, DVD) and separate `.srt` files are not
-  supported yet.
+- Picture-based subtitles (Blu-ray PGS, DVD) are not supported yet.
+- A subtitle file beside the video is used when it has the video's exact name
+  with the `.srt` extension (`Film.mkv` and `Film.srt`). It is switched on by
+  itself and comes first in the list, before the tracks inside the video.
+  UTF-8 and UTF-16 are recognised; anything else is read as Windows-1250
+  (Central European). Other subtitle file types (`.ass`, `.vtt`) are not read.
 - The screen runs at 1280x720 for sources up to 720p and switches to
   1920x1080 for larger ones.
 - Jumps land on the nearest key frame, so the distance is approximate.

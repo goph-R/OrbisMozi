@@ -87,7 +87,7 @@ $(BUILD):
 	mkdir -p $@
 
 # PC test build: same player core, fake display and audio device.
-HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c src/textinput.c src/shareform.c src/subfont.c src/backdrop.c src/ui.c host/plat_host.c
+HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c src/textinput.c src/shareform.c src/subfont.c src/extsub.c src/menu.c src/backdrop.c src/ui.c host/plat_host.c
 host: $(BUILD)/player_host
 $(BUILD)/player_host: $(HOST_SRCS) $(wildcard src/*.h) $(BLOBS) | $(BUILD)
 	clang -O2 -g -Wall -Wextra -DAPP_VERSION='"$(APP_VERSION)"' -I$(FFMPEG_HOST)/include -I$(SMB2_HOST)/include -o $@ $(HOST_SRCS) \

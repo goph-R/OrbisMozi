@@ -7,7 +7,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum { UI_FONT_TEXT, UI_FONT_TITLE };       /* 24 and 42 pixels */
+/* 24, 42, 16 and 36 pixels. The menu uses the first two; SMALL and LARGE
+ * are what TEXT becomes over a video: the overlay's text on a 720-line
+ * screen, and the dialog's text on a 1080-line one. */
+enum { UI_FONT_TEXT, UI_FONT_TITLE, UI_FONT_SMALL, UI_FONT_LARGE };
 
 /* The order of the pictures in tools/mkuiart.py. */
 enum {

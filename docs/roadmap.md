@@ -2,7 +2,8 @@
 
 ## Not there yet
 
-- Picture-based subtitles (Blu-ray PGS, DVD) and separate `.srt` files
+- Picture-based subtitles (Blu-ray PGS, DVD)
+- Subtitle files other than `.srt` (`.ass`, `.vtt`), and names with a language in them (`Film.hu.srt`)
 - Remembering the preferred audio and subtitle language
 - A designed playback overlay (the menu, the file list and the share form
   are designed; the overlay is still plain text)

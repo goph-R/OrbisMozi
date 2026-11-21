@@ -33,7 +33,8 @@ console that can run homebrew packages, for example with GoldHEN.
 - **Network shares:** plays directly from a Windows or Samba share (SMB2/SMB3),
   with nothing to copy.
 - **Subtitles and audio tracks:** text subtitles inside the file (SRT, ASS),
-  with accented letters, and a choice between the file's audio tracks.
+  or from an `.srt` file with the video's name beside it, with accented
+  letters, and a choice between the file's audio tracks.
 - **The usual controls:** pause, jumps of 10 seconds and 10 minutes, and
   volume up to 200%.
 
@@ -82,8 +83,8 @@ USB drives cannot be read: a PS4 application is not allowed to see them.
 | D-pad up/down | move | volume up / down |
 | D-pad left/right | page up / down | 10 seconds back / forward (hold to keep going) |
 | L1 / R1 | page up / down | 10 minutes back / forward |
-| Cross | open folder / play | pause, continue |
-| Circle | back | stop, return to the list |
+| Cross | open folder / play | show the overlay |
+| Circle | back | pause and open the menu (continue, subtitles, audio, picture, rewind, help, exit) |
 | Square | change or delete a share | next audio track |
 | OPTIONS | | next subtitle track, then off |
 | Triangle | | show / hide the diagnostics line |
@@ -91,10 +92,11 @@ USB drives cannot be read: a PS4 application is not allowed to see them.
 
 ## Good to know
 
-- **Tested on a PS4 Pro only.** Reports from other models are welcome.
+- **Tested on a PS4 Pro, and reported working on a base PS4** (a 1080p H.264
+  film from a Samba share, no dropped frames). Reports from other models are
+  welcome.
 - 4K and heavy H.265 files are not expected to play smoothly.
-- Picture-based subtitles (Blu-ray, DVD) and separate `.srt` files are not
-  supported yet.
+- Picture-based subtitles (Blu-ray, DVD) are not supported yet.
 - Surround sound is mixed down to stereo.
 
 **If something does not work**, the app writes a log to

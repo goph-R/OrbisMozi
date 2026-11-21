@@ -6,7 +6,7 @@
 Without arguments it makes the subtitle font, src/subfont.bin. The menu font
 is made with:
 
-    tools/mksubfont.py /usr/share/fonts/truetype/noto/NotoSans-Regular.ttf src/uifont.bin 24 42
+    tools/mksubfont.py /usr/share/fonts/truetype/noto/NotoSans-Regular.ttf src/uifont.bin 24 42 16 36
 
 Layout of the file (little endian):
     "MZF1", u16 number of fonts

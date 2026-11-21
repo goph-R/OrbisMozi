@@ -15,7 +15,7 @@ __asm__(".section .rodata\n"
         ".previous\n");
 extern const uint8_t uifont_blob[], uiart_blob[];
 
-#define MAX_FONTS 2
+#define MAX_FONTS 4
 
 typedef struct {
     const uint8_t *table;       /* 12 bytes per glyph, sorted by code point */
