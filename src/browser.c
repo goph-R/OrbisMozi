@@ -238,9 +238,9 @@ static int count(void)
 #define ROOT_H      81
 #define ROOT_PITCH  90
 #define ROOT_ROWS   3
-#define LIST_Y      262                 /* inside a folder: plain rows */
+#define LIST_Y      122                 /* inside a folder: plain rows, no logo above */
 #define LIST_PITCH  36
-#define LIST_ROWS   9
+#define LIST_ROWS   13
 #define ROW_KEEP    174                 /* rows are black at 32 %: 174/256 of the light stays */
 
 static int visible_rows(void)
@@ -295,14 +295,9 @@ static void draw(const char *busy)
 
     backdrop_draw(fb, W, H);
 
-    /* Header: logo, name, version, and a thin line under them. */
-    ui_image(fb, W, H, 115, 92, UI_IMG_LOGO);
-    int x = ui_text(fb, W, H, 180, 107, UI_FONT_TITLE, "Orbis Mozi", COL_TEXT);
-    ui_text(fb, W, H, x + 13, 107, UI_FONT_TEXT, "v" APP_VERSION, COL_TEXT);
-    osd_fill(fb, W, H, MX, 158, W - 2 * MX, 1, COL_TEXT);
-
-    /* Under the line: where we are, or what went wrong. */
+    /* What is said above the list: where we are, or what went wrong. */
     uint32_t colour = COL_TEXT;
+    int is_place = 0;
     if (busy) {
         snprintf(text, sizeof(text), "%s", busy);
     } else if (B.message[0]) {
@@ -312,11 +307,37 @@ static void draw(const char *busy)
         snprintf(text, sizeof(text), "Choose where to look for videos");
     } else if (smb_is_url(B.cur)) {
         smb_display_name(B.cur, text, sizeof(text));
+        is_place = 1;
     } else {
         snprintf(text, sizeof(text), "%s", B.cur);
+        is_place = 1;
     }
-    ui_fit(UI_FONT_TEXT, text, W - 2 * MX, line, sizeof(line));
-    ui_text(fb, W, H, MX, 220, UI_FONT_TEXT, line, colour);
+
+    if (!B.cur[0]) {
+        /* Top-level list: logo, name, version, a thin line, then the text. */
+        ui_image(fb, W, H, 115, 92, UI_IMG_LOGO);
+        int x = ui_text(fb, W, H, 180, 107, UI_FONT_TITLE, "Orbis Mozi", COL_TEXT);
+        ui_text(fb, W, H, x + 13, 107, UI_FONT_TEXT, "v" APP_VERSION, COL_TEXT);
+        osd_fill(fb, W, H, MX, 158, W - 2 * MX, 1, COL_TEXT);
+        ui_fit(UI_FONT_TEXT, text, W - 2 * MX, line, sizeof(line));
+        ui_text(fb, W, H, MX, 220, UI_FONT_TEXT, line, colour);
+    } else {
+        /* Inside a folder the text is the heading, so the list gets the room.
+         * A long location loses its beginning: the end says where we are. */
+        if (is_place && ui_text_width(UI_FONT_TEXT, text) > W - 2 * MX) {
+            const char *p = text;
+            do {
+                p++;
+                while ((*p & 0xC0) == 0x80)
+                    p++;
+                snprintf(line, sizeof(line), "\xE2\x80\xA6%s", p);
+            } while (*p && ui_text_width(UI_FONT_TEXT, line) > W - 2 * MX);
+        } else {
+            ui_fit(UI_FONT_TEXT, text, W - 2 * MX, line, sizeof(line));
+        }
+        ui_text(fb, W, H, MX, 84, UI_FONT_TEXT, line, colour);
+        osd_fill(fb, W, H, MX, 104, W - 2 * MX, 1, COL_TEXT);
+    }
 
     /* Keep the selection inside the visible part of the list. */
     if (B.sel < B.top)
@@ -345,7 +366,7 @@ static void draw(const char *busy)
     }
 
     /* Bottom: what the buttons do, and the place in the list. */
-    x = hint(fb, W, H, MX - 1, UI_IMG_CROSS, "Open");
+    int x = hint(fb, W, H, MX - 1, UI_IMG_CROSS, "Open");
     if (B.cur[0]) {
         hint(fb, W, H, x, UI_IMG_CIRCLE, "Back");
         if (n > 0) {
