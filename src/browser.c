@@ -1,4 +1,4 @@
-/* A plain list to pick a video from: the console's own folder and the
+/* The list to pick a video from: the console's own folder and the
  * network shares named in the shares file. */
 #include <dirent.h>
 #include <errno.h>
@@ -14,16 +14,14 @@
 #include "plat.h"
 #include "shareform.h"
 #include "smb.h"
+#include "ui.h"
 
 #define MAX_ROOTS   16
 #define MAX_DEPTH   64
 #define PATH_MAX_   1200
 
-#define COL_TEXT    0xFFE8E8F0u
-#define COL_DIM     0xFFB4C2E4u
-#define COL_FOLDER  0xFFFFD27Fu
-#define COL_SEL_BG  0xFF3D7BFFu
-#define COL_ERROR   0xFFFF8080u
+#define COL_TEXT    0xFFFFFFFFu
+#define COL_ERROR   0xFFFF9C9Cu
 
 typedef struct {
     char name[256];
@@ -233,73 +231,92 @@ static int count(void)
 
 /* --- drawing ------------------------------------------------------------- */
 
-/* Copies at most max_chars characters of UTF-8 text, ending with "..." if cut. */
-static void shorten(char *out, size_t out_size, const char *text, int max_chars)
+/* The layout follows the main menu mockup, which is drawn at 1920x1080;
+ * the menu runs at 1280x720, so every measure here is 2/3 of the drawing. */
+#define MX          64                  /* left and right margin */
+#define ROOT_Y      269                 /* top-level list: big rows with a picture */
+#define ROOT_H      81
+#define ROOT_PITCH  90
+#define ROOT_ROWS   3
+#define LIST_Y      262                 /* inside a folder: plain rows */
+#define LIST_PITCH  36
+#define LIST_ROWS   9
+#define ROW_KEEP    174                 /* rows are black at 32 %: 174/256 of the light stays */
+
+static int visible_rows(void)
 {
-    size_t o = 0;
-    int chars = 0, total = 0;
-
-    for (const char *p = text; *p; p++)
-        if ((*p & 0xC0) != 0x80)
-            total++;
-    int keep = total > max_chars ? max_chars - 3 : total;
-
-    while (*text && chars < keep && o + 5 < out_size) {
-        do
-            out[o++] = *text++;
-        while ((*text & 0xC0) == 0x80 && o + 5 < out_size);
-        chars++;
-    }
-    if (total > max_chars)
-        for (int i = 0; i < 3; i++)
-            out[o++] = '.';
-    out[o] = '\0';
+    return B.cur[0] ? LIST_ROWS : ROOT_ROWS;
 }
 
-static void label_of(int i, char *out, size_t out_size, int *is_dir)
+/* A button picture with its label; returns where the next one starts. */
+static int hint(uint32_t *fb, int W, int H, int x, int image, const char *label)
 {
-    if (B.cur[0]) {
-        snprintf(out, out_size, "%s", B.items[i].name);
-        *is_dir = B.items[i].is_dir;
-        return;
-    }
-    *is_dir = 1;
+    ui_image(fb, W, H, x + 24, 635, image);
+    return ui_text(fb, W, H, x + 67, 644, UI_FONT_TEXT, label, COL_TEXT) + 79;
+}
+
+static void draw_root_row(uint32_t *fb, int W, int H, int i, int y)
+{
+    char path[PATH_MAX_], fitted[PATH_MAX_];
+    const char *label;
+    int image;
+
+    path[0] = '\0';
     if (i >= B.n_roots) {
-        snprintf(out, out_size, "Add network share...");
+        label = "Add network share";
+        image = UI_IMG_PLUS;
     } else if (smb_is_url(B.roots[i])) {
-        smb_display_name(B.roots[i], out, out_size);
+        label = "Local network";
+        image = UI_IMG_SHARE;
+        smb_display_name(B.roots[i], path, sizeof(path));
     } else {
-        snprintf(out, out_size, "This console  (%s)", B.roots[i]);
+        label = "This console";
+        image = UI_IMG_DRIVE;
+        snprintf(path, sizeof(path), "%s", B.roots[i]);
     }
+
+    ui_dim(fb, W, H, MX, y, W - 2 * MX, ROOT_H, ROW_KEEP);
+    if (i == B.sel)
+        ui_frame(fb, W, H, MX - 8, y - 8, W - 2 * MX + 16, ROOT_H + 16, 5, COL_TEXT);
+    ui_image(fb, W, H, 109, y + ROOT_H / 2, image);
+    int x = ui_text(fb, W, H, 154, y + 50, UI_FONT_TEXT, label, COL_TEXT);
+
+    int right = W - MX - 52;
+    ui_fit(UI_FONT_TEXT, path, right - x - 40, fitted, sizeof(fitted));
+    ui_text(fb, W, H, right - ui_text_width(UI_FONT_TEXT, fitted), y + 50, UI_FONT_TEXT, fitted, COL_TEXT);
 }
 
 static void draw(const char *busy)
 {
     uint32_t *fb = plat_backbuffer();
     int W = plat_width(), H = plat_height();
-    int fw = osd_font_width(), fh = osd_font_height();
-    int margin_x = W / 20, margin_y = H / 20;       /* TVs may crop the edges */
-    int row_h = fh + 8;
-    int list_y = margin_y + 3 * fh;
-    int rows = (H - margin_y - 3 * fh - list_y) / row_h;
-    int cols = (W - 2 * margin_x) / fw - 2;
     char text[1300], line[1300];
-    int n = count();
+    int n = count(), rows = visible_rows();
 
     backdrop_draw(fb, W, H);
-    backdrop_shade(fb, W, H, margin_x - 16, list_y - 10, W - 2 * margin_x + 32, rows * row_h + 20);
 
-    osd_text(fb, W, H, margin_x, margin_y, "Orbis Mozi", COL_TEXT, 0);
-    if (B.cur[0]) {
-        if (smb_is_url(B.cur))
-            smb_display_name(B.cur, text, sizeof(text));
-        else
-            snprintf(text, sizeof(text), "%s", B.cur);
-    } else {
+    /* Header: logo, name, version, and a thin line under them. */
+    ui_image(fb, W, H, 115, 92, UI_IMG_LOGO);
+    int x = ui_text(fb, W, H, 180, 107, UI_FONT_TITLE, "Orbis Mozi", COL_TEXT);
+    ui_text(fb, W, H, x + 13, 107, UI_FONT_TEXT, "v" APP_VERSION, COL_TEXT);
+    osd_fill(fb, W, H, MX, 158, W - 2 * MX, 1, COL_TEXT);
+
+    /* Under the line: where we are, or what went wrong. */
+    uint32_t colour = COL_TEXT;
+    if (busy) {
+        snprintf(text, sizeof(text), "%s", busy);
+    } else if (B.message[0]) {
+        snprintf(text, sizeof(text), "%s", B.message);
+        colour = COL_ERROR;
+    } else if (!B.cur[0]) {
         snprintf(text, sizeof(text), "Choose where to look for videos");
+    } else if (smb_is_url(B.cur)) {
+        smb_display_name(B.cur, text, sizeof(text));
+    } else {
+        snprintf(text, sizeof(text), "%s", B.cur);
     }
-    shorten(line, sizeof(line), text, cols);
-    osd_text(fb, W, H, margin_x, margin_y + fh + 4, line, COL_DIM, 0);
+    ui_fit(UI_FONT_TEXT, text, W - 2 * MX, line, sizeof(line));
+    ui_text(fb, W, H, MX, 220, UI_FONT_TEXT, line, colour);
 
     /* Keep the selection inside the visible part of the list. */
     if (B.sel < B.top)
@@ -309,38 +326,35 @@ static void draw(const char *busy)
     if (B.top < 0)
         B.top = 0;
 
-    for (int i = B.top; i < n && i < B.top + rows; i++) {
-        int y = list_y + (i - B.top) * row_h, is_dir;
-        uint32_t bg = i == B.sel ? COL_SEL_BG : 0;
+    if (!B.cur[0]) {
+        for (int i = B.top; i < n && i < B.top + rows; i++)
+            draw_root_row(fb, W, H, i, ROOT_Y + (i - B.top) * ROOT_PITCH);
+    } else {
+        ui_dim(fb, W, H, MX, LIST_Y, W - 2 * MX, LIST_ROWS * LIST_PITCH, ROW_KEEP);
+        for (int i = B.top; i < n && i < B.top + rows; i++) {
+            int y = LIST_Y + (i - B.top) * LIST_PITCH;
 
-        label_of(i, text, sizeof(text), &is_dir);
-        if (i == B.sel)
-            osd_fill(fb, W, H, margin_x, y, W - 2 * margin_x, row_h, bg);
-        shorten(line, sizeof(line), text, cols - (is_dir && B.cur[0] ? 1 : 0));
-        int x = osd_text(fb, W, H, margin_x + fw, y + 4, line,
-                         i == B.sel ? 0xFFFFFFFFu : is_dir ? COL_FOLDER : COL_TEXT, bg);
-        if (is_dir && B.cur[0])
-            osd_text(fb, W, H, x, y + 4, "/", i == B.sel ? 0xFFFFFFFFu : COL_FOLDER, bg);
+            snprintf(text, sizeof(text), "%s%s", B.items[i].name, B.items[i].is_dir ? "/" : "");
+            ui_fit(UI_FONT_TEXT, text, W - 2 * MX - 40, line, sizeof(line));
+            ui_text(fb, W, H, MX + 20, y + 26, UI_FONT_TEXT, line, COL_TEXT);
+            if (i == B.sel)
+                ui_frame(fb, W, H, MX, y, W - 2 * MX, LIST_PITCH, 3, COL_TEXT);
+        }
+        if (n == 0 && !busy && !B.message[0])
+            ui_text(fb, W, H, MX + 20, LIST_Y + 26, UI_FONT_TEXT, "No videos or folders here.", COL_TEXT);
     }
 
-    if (busy) {
-        osd_text(fb, W, H, margin_x + fw, list_y + 4, busy, COL_DIM, 0);
-    } else if (B.message[0]) {
-        shorten(line, sizeof(line), B.message, cols);
-        osd_text(fb, W, H, margin_x + fw, list_y + 4, line, COL_ERROR, 0);
-    } else if (n == 0) {
-        osd_text(fb, W, H, margin_x + fw, list_y + 4, "No videos or folders here.", COL_DIM, 0);
+    /* Bottom: what the buttons do, and the place in the list. */
+    x = hint(fb, W, H, MX - 1, UI_IMG_CROSS, "Open");
+    if (B.cur[0]) {
+        hint(fb, W, H, x, UI_IMG_CIRCLE, "Back");
+        if (n > 0) {
+            snprintf(text, sizeof(text), "%d / %d", B.sel + 1, n);
+            ui_text(fb, W, H, W - MX - ui_text_width(UI_FONT_TEXT, text), 644, UI_FONT_TEXT, text, COL_TEXT);
+        }
+    } else {
+        hint(fb, W, H, x, UI_IMG_SQUARE, "Change / Delete a share");
     }
-
-    int foot_y = H - margin_y - fh;
-    if (n > 0)
-        snprintf(text, sizeof(text), "%d / %d", B.sel + 1, n);
-    else
-        text[0] = '\0';
-    osd_text(fb, W, H, W - margin_x - (int)strlen(text) * fw, foot_y, text, COL_DIM, 0);
-    osd_text(fb, W, H, margin_x, foot_y,
-             B.cur[0] ? "X open    O back    L1/R1 page up/down" : "X open    Square change or delete a share",
-             COL_DIM, 0);
 
     plat_flip();
 }
@@ -400,7 +414,7 @@ int browser_pick(char *out, size_t out_size)
         }
         prev = pad;
 
-        int n = count(), page = 15;
+        int n = count(), page = visible_rows();
         if (pressed & PAD_UP)                 B.sel--;
         if (pressed & PAD_DOWN)               B.sel++;
         if (pressed & (PAD_L1 | PAD_LEFT))    B.sel -= page;

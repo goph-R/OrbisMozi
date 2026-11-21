@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Renders the subtitle font into src/subfont.bin (anti-aliased, two sizes).
+"""Renders a font into a glyph file (anti-aliased, one or more sizes).
 
-    tools/mksubfont.py [font.ttf] [out.bin]
+    tools/mksubfont.py [font.ttf] [out.bin] [pixel sizes...]
+
+Without arguments it makes the subtitle font, src/subfont.bin. The menu font
+is made with:
+
+    tools/mksubfont.py /usr/share/fonts/truetype/noto/NotoSans-Regular.ttf src/uifont.bin 24 42
 
 Layout of the file (little endian):
     "MZF1", u16 number of fonts
@@ -17,8 +22,9 @@ from PIL import Image, ImageDraw, ImageFont
 ttf = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 out = sys.argv[2] if len(sys.argv) > 2 else "src/subfont.bin"
 
-SIZES = [34, 51]            # for 720-line and 1080-line screens
+SIZES = [int(a) for a in sys.argv[3:]] or [34, 51]     # subtitles: for 720-line and 1080-line screens
 CODES = (list(range(0x20, 0x7F)) + list(range(0xA0, 0x180)) +
+         list(range(0x384, 0x3CF)) + list(range(0x400, 0x460)) +        # Greek, Cyrillic
          [0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x201E, 0x2022, 0x2026, 0x266A, 0x266B])
 
 fonts = []

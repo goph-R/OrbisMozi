@@ -8,6 +8,7 @@
 
 TITLE       := Orbis Mozi
 VERSION     := 1.00
+APP_VERSION := 0.0.1
 TITLE_ID    := MOZI00001
 CONTENT_ID  := IV0000-$(TITLE_ID)_00-ORBISMOZI0000000
 
@@ -32,7 +33,8 @@ PKGTOOL     := DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 LD_LIBRARY_PATH=$(SSL11) 
 FFLIBS      := -lavformat -lavcodec -lswscale -lswresample -lavutil
 LIBS        := $(FFLIBS) -lsmb2 -lm -lc -lkernel -lSceVideoOut -lSceAudioOut -lSceUserService -lScePad -lSceNet -lSceImeDialog -lSceSysmodule
 CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -march=btver2 \
-               -Wall -Wextra -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -I$(FFMPEG)/include -I$(SMB2)/include
+               -Wall -Wextra -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -I$(FFMPEG)/include -I$(SMB2)/include \
+               -DAPP_VERSION='"$(APP_VERSION)"'
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr \
                --wrap=pthread_create --wrap=fcntl -L$(FFMPEG)/lib -L$(SMB2)/lib -L$(TOOLCHAIN)/lib $(LIBS) $(TOOLCHAIN)/lib/crt1.o
 
@@ -43,6 +45,9 @@ OBJS        := $(patsubst src/%.c,$(BUILD)/%.o,$(SRCS))
 # System files every package needs. They are not kept in this repository;
 # they are copied from the toolchain's samples on first build.
 SAMPLE      := $(TOOLCHAIN)/samples/hello_world
+# Fonts and pictures that are linked into the program (made by tools/mksubfont.py
+# and tools/mkuiart.py; kept in the repository).
+BLOBS       := src/subfont.bin src/uifont.bin src/uiart.bin
 SYSFILES    := sce_sys/about/right.sprx sce_module/libc.prx sce_module/libSceFios2.prx
 
 all: $(CONTENT_ID).pkg
@@ -74,17 +79,17 @@ eboot.bin: $(OBJS)
 	$(LD) $(OBJS) -o $(BUILD)/player.elf $(LDFLAGS)
 	$(TOOLS)/create-fself -in=$(BUILD)/player.elf -out=$(BUILD)/player.oelf --eboot "eboot.bin" --paid 0x3800000000000011
 
-$(BUILD)/%.o: src/%.c $(wildcard src/*.h) src/subfont.bin | $(BUILD)
+$(BUILD)/%.o: src/%.c $(wildcard src/*.h) $(BLOBS) | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD):
 	mkdir -p $@
 
 # PC test build: same player core, fake display and audio device.
-HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c src/textinput.c src/shareform.c src/subfont.c src/backdrop.c host/plat_host.c
+HOST_SRCS := src/main.c src/player.c src/osd.c src/browser.c src/smb.c src/textinput.c src/shareform.c src/subfont.c src/backdrop.c src/ui.c host/plat_host.c
 host: $(BUILD)/player_host
-$(BUILD)/player_host: $(HOST_SRCS) $(wildcard src/*.h) src/subfont.bin | $(BUILD)
-	clang -O2 -g -Wall -Wextra -I$(FFMPEG_HOST)/include -I$(SMB2_HOST)/include -o $@ $(HOST_SRCS) \
+$(BUILD)/player_host: $(HOST_SRCS) $(wildcard src/*.h) $(BLOBS) | $(BUILD)
+	clang -O2 -g -Wall -Wextra -DAPP_VERSION='"$(APP_VERSION)"' -I$(FFMPEG_HOST)/include -I$(SMB2_HOST)/include -o $@ $(HOST_SRCS) \
 	      -L$(FFMPEG_HOST)/lib -L$(SMB2_HOST)/lib $(FFLIBS) -lsmb2 -lm -lpthread
 
 clean:
