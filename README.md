@@ -15,6 +15,11 @@ Player refuses: MKV and other containers, decoded with FFmpeg.</p>
   <img src="https://img.shields.io/badge/License-MIT-blue" alt="License">
 </p>
 
+<p align="center">
+  <img src="docs/screenshot-main.jpg" alt="The main menu of Orbis Mozi: this console, a network share, and adding a share"><br>
+  <em>Main menu</em>
+</p>
+
 It is homebrew for consoles that can run fake-signed packages (for example
 with GoldHEN). *Mozi* is Hungarian for cinema; *Orbis* is the PS4's codename.
 
@@ -37,7 +42,7 @@ All of these played on a PS4 Pro, each from a short test clip:
 
 | Video | Tested as | Audio in the clip | Container |
 |---|---|---|---|
-| H.264 | 720p, 720p 60 fps, 1080p 18 Mbit/s | AAC, AC3 5.1 | MKV, MP4 |
+| H.264 | 720p, 720p 60 fps, 1080p 18 Mbit/s | AAC, AC3 5.1 | MKV, MP4, FLV |
 | H.264 10-bit | 720p | AAC | MKV |
 | H.265 (HEVC) | 720p, 1080p | AAC | MKV |
 | H.265 10-bit | 1080p | AAC | MKV |
@@ -50,7 +55,7 @@ All of these played on a PS4 Pro, each from a short test clip:
 
 | Audio | Tested as |
 |---|---|
-| AAC | stereo |
+| AAC | stereo (48 kHz and 44.1 kHz) |
 | AC3 | stereo and 5.1 |
 | E-AC3 | 5.1 |
 | DTS | 5.1 |
@@ -64,7 +69,7 @@ All of these played on a PS4 Pro, each from a short test clip:
 
 Also built in but not tried on the console yet: VC-1, WMV3, MJPEG and
 MPEG-1 video; TrueHD, WMA and PCM audio; MP4 timed text and WebVTT
-subtitles; the FLV, ASF/WMV and OGG containers.
+subtitles; the ASF/WMV and OGG containers.
 
 Multichannel audio is mixed down to stereo.
 
