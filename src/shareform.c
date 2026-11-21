@@ -16,6 +16,7 @@
 #define COL_ERROR   0xFFFF9C9Cu
 #define COL_SAVE_BG 0xFFFFFFFFu             /* the Save button: white, dark blue text */
 #define COL_SAVE    0xFF051D49u
+#define COL_BOX     0xFF2B2B30u             /* the question box: dark grey */
 
 /* Sizes for the 1280x720 menu, taken from the 1080p mockup (times 2/3). */
 #define MX          64                  /* left and right margin */
@@ -78,10 +79,9 @@ static void select_frame(uint32_t *fb, int W, int H, int x, int y, int w, int h)
     ui_frame(fb, W, H, x - 8, y - 8, w + 16, h + 16, 5, COL_TEXT);
 }
 
-static void draw(void)
+/* Paints the form into the back buffer, without showing it yet. */
+static void paint(uint32_t *fb, int W, int H)
 {
-    uint32_t *fb = plat_backbuffer();
-    int W = plat_width(), H = plat_height();
     char shown[300];
 
     backdrop_draw(fb, W, H);
@@ -133,7 +133,53 @@ static void draw(void)
     uint32_t colour = F.busy || F.sel < N_FIELDS ? COL_TEXT : F.message_colour;
     ui_fit(UI_FONT_TEXT, note, W - MX - x, shown, sizeof(shown));
     ui_text(fb, W, H, W - MX - ui_text_width(UI_FONT_TEXT, shown), 644, UI_FONT_TEXT, shown, colour);
+}
+
+static void draw(void)
+{
+    paint(plat_backbuffer(), plat_width(), plat_height());
     plat_flip();
+}
+
+/* A question in a box over the darkened form, with OK and Cancel under it.
+ * Cancel is selected at first, so a stray press does no harm. Returns 1 for OK. */
+static int confirm(const char *question, const char *detail)
+{
+    enum { BOX_W = 620, BOX_H = 250, BTN_W = 175, BTN_H = 54, GAP = 28 };
+    unsigned prev = plat_pad();
+    int ok = 0;
+
+    for (;;) {
+        uint32_t *fb = plat_backbuffer();
+        int W = plat_width(), H = plat_height();
+        int bx = (W - BOX_W) / 2, by = (H - BOX_H) / 2;
+        int ok_x = W / 2 - GAP / 2 - BTN_W, cancel_x = W / 2 + GAP / 2, btn_y = by + BOX_H - BTN_H - 36;
+        char shown[300];
+
+        paint(fb, W, H);
+        ui_dim(fb, W, H, 0, 0, W, H, 110);
+        osd_fill(fb, W, H, bx, by, BOX_W, BOX_H, COL_BOX);
+        ui_frame(fb, W, H, bx, by, BOX_W, BOX_H, 1, COL_TEXT);
+        ui_text(fb, W, H, (W - ui_text_width(UI_FONT_TEXT, question)) / 2, by + 62, UI_FONT_TEXT, question, COL_TEXT);
+        ui_fit(UI_FONT_TEXT, detail, BOX_W - 80, shown, sizeof(shown));
+        ui_text(fb, W, H, (W - ui_text_width(UI_FONT_TEXT, shown)) / 2, by + 104, UI_FONT_TEXT, shown, COL_TEXT);
+
+        osd_fill(fb, W, H, ok_x, btn_y, BTN_W, BTN_H, COL_SAVE_BG);
+        ui_dim(fb, W, H, cancel_x, btn_y, BTN_W, BTN_H, 110);
+        select_frame(fb, W, H, ok ? ok_x : cancel_x, btn_y, BTN_W, BTN_H);
+        ui_text(fb, W, H, ok_x + (BTN_W - ui_text_width(UI_FONT_TEXT, "OK")) / 2, btn_y + 35, UI_FONT_TEXT, "OK", COL_BOX);
+        ui_text(fb, W, H, cancel_x + (BTN_W - ui_text_width(UI_FONT_TEXT, "Cancel")) / 2, btn_y + 35, UI_FONT_TEXT,
+                "Cancel", COL_TEXT);
+        plat_flip();
+
+        unsigned pad = plat_pad();
+        unsigned pressed = pad & ~prev;
+        prev = pad;
+        if (pressed & PAD_LEFT)   ok = 1;
+        if (pressed & PAD_RIGHT)  ok = 0;
+        if (pressed & PAD_CIRCLE) return 0;
+        if (pressed & PAD_CROSS)  return ok;
+    }
 }
 
 static void say(uint32_t colour, const char *text)
@@ -231,7 +277,11 @@ int shareform_run(char *url, size_t url_size, int is_new)
             if (build(url, url_size) == 0)
                 return FORM_SAVE;
         } else if (F.sel == A_DELETE) {
-            return FORM_DELETE;
+            char where[400];
+            snprintf(where, sizeof(where), "//%s/%s", F.parts.host, F.parts.share);
+            if (confirm("Delete this share?", where))
+                return FORM_DELETE;
+            prev = plat_pad();
         }
     }
 }
