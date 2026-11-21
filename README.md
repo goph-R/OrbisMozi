@@ -23,8 +23,9 @@ Player refuses: MKV and other containers, decoded with FFmpeg.</p>
 It is homebrew for consoles that can run fake-signed packages (for example
 with GoldHEN). *Mozi* is Hungarian for cinema; *Orbis* is the PS4's codename.
 
-> **Status: early.** Playback works and stays in sync. There is a plain file
-> list, pause, stop, seeking, audio track choice and text subtitles.
+> **Status: early.** Playback works and stays in sync. There is a menu with a
+> file list, pause, stop, seeking, audio track choice and text subtitles. See
+> the [changelog](CHANGELOG.md).
 
 ## What works
 
@@ -85,7 +86,8 @@ Multichannel audio is mixed down to stereo.
 
 - Picture-based subtitles (Blu-ray PGS, DVD) and separate `.srt` files
 - Remembering the preferred audio and subtitle language
-- A designed interface (the list is plain text for now)
+- A designed playback overlay and share form (only the menu and the file
+  list are designed so far)
 
 ## Future improvements
 
@@ -122,7 +124,7 @@ tracks.
      ```sh
      curl -T film.mkv ftp://<ps4-ip>:2121/data/video/
      ```
-   - **Add a network share.** Choose "Add network share..." in the list
+   - **Add a network share.** Choose "Add network share" in the menu
      and fill in the server address, share name, user and password. "Test
      connection" tells you whether it works before you save. Square on a
      share in the list changes or deletes it.
