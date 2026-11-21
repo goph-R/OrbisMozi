@@ -220,3 +220,9 @@ void ui_frame(uint32_t *fb, int W, int H, int x, int y, int w, int h, int thick,
     osd_fill(fb, W, H, x, y + thick, thick, h - 2 * thick, colour);
     osd_fill(fb, W, H, x + w - thick, y + thick, thick, h - 2 * thick, colour);
 }
+
+int ui_hint(uint32_t *fb, int fb_w, int fb_h, int x, int image, const char *label)
+{
+    ui_image(fb, fb_w, fb_h, x + 24, 635, image);
+    return ui_text(fb, fb_w, fb_h, x + 67, 644, UI_FONT_TEXT, label, 0xFFFFFFFFu) + 79;
+}

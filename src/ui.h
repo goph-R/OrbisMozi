@@ -33,4 +33,7 @@ void ui_dim(uint32_t *fb, int fb_w, int fb_h, int x, int y, int w, int h, int ke
 /* Draws the outline of a rectangle, `thick` pixels wide, inside x, y, w, h. */
 void ui_frame(uint32_t *fb, int fb_w, int fb_h, int x, int y, int w, int h, int thick, uint32_t colour);
 
+/* A button picture with its label in the footer; returns where the next one starts. */
+int  ui_hint(uint32_t *fb, int fb_w, int fb_h, int x, int image, const char *label);
+
 #endif

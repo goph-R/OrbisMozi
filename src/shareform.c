@@ -9,24 +9,43 @@
 #include "shareform.h"
 #include "smb.h"
 #include "textinput.h"
+#include "ui.h"
 
-#define COL_TEXT    0xFFE8E8F0u
-#define COL_DIM     0xFFB4C2E4u
-#define COL_SEL_BG  0xFF3D7BFFu
-#define COL_OK      0xFF80E090u
-#define COL_ERROR   0xFFFF8080u
+#define COL_TEXT    0xFFFFFFFFu
+#define COL_OK      0xFFA6F5B4u
+#define COL_ERROR   0xFFFF9C9Cu
+#define COL_SAVE_BG 0xFFFFFFFFu             /* the Save button: white, dark blue text */
+#define COL_SAVE    0xFF051D49u
+
+/* Sizes for the 1280x720 menu, taken from the 1080p mockup (times 2/3). */
+#define MX          64                  /* left and right margin */
+#define FIELD_Y     169                 /* the five fields */
+#define FIELD_H     54
+#define BUTTON_Y    510                 /* the row of buttons under them */
+#define BUTTON_H    72
+#define ROW_KEEP    174                 /* rows are black at 32 %: 174/256 of the light stays */
 
 enum { F_SERVER, F_SHARE, F_USER, F_PASSWORD, F_FOLDER, N_FIELDS,
-       A_TEST = N_FIELDS, A_SAVE, A_DELETE };
+       A_DELETE = N_FIELDS, A_TEST, A_SAVE };
 
 static const struct {
     const char *label, *title, *hint;
 } g_fields[N_FIELDS] = {
-    { "Server",   "Server address", "The computer or NAS: its IP address, for example 192.168.1.10" },
-    { "Share",    "Share name",     "The name of the shared folder on that server" },
-    { "User",     "User name",      "Leave empty if the share needs no login" },
-    { "Password", "Password",       "Stored on this console as plain text" },
-    { "Folder",   "Start folder",   "Optional: a folder inside the share to start in, for example films/new" },
+    { "Server IP",         "Server address", "The computer or NAS, for example 192.168.1.10" },
+    { "Share",             "Share name",     "The name of the shared folder on that server" },
+    { "User",              "User name",      "Leave empty if the share needs no login" },
+    { "Password",          "Password",       "Stored on this console as plain text" },
+    { "Folder (optional)", "Start folder",   "A folder inside the share to start in, for example films/new" },
+};
+
+/* The buttons, left to right. "Delete this share" exists only when changing a share. */
+static const struct {
+    const char *label;
+    int x, w;
+} g_buttons[3] = {
+    { "Delete this share", 64,   319 },
+    { "Test connection",   724,  305 },
+    { "Save",              1041, 175 },
 };
 
 static struct {
@@ -48,76 +67,78 @@ static char *field_text(int i, int *size)
     }
 }
 
-static int row_count(void)
+static int field_y(int i)
 {
-    return F.is_new ? A_SAVE + 1 : A_DELETE + 1;
+    return FIELD_Y + (i * 190 + 1) / 3;         /* a pitch of 95 mockup pixels */
+}
+
+/* The white frame around the selected row or button. */
+static void select_frame(uint32_t *fb, int W, int H, int x, int y, int w, int h)
+{
+    ui_frame(fb, W, H, x - 8, y - 8, w + 16, h + 16, 5, COL_TEXT);
 }
 
 static void draw(void)
 {
     uint32_t *fb = plat_backbuffer();
     int W = plat_width(), H = plat_height();
-    int fw = osd_font_width(), fh = osd_font_height();
-    int mx = W / 20, my = H / 20;
-    int row_h = fh + 10, y0 = my + 3 * fh;
-    int value_x = mx + 14 * fw;
-    int max_chars = (W - mx - value_x) / fw - 2;
+    char shown[300];
 
     backdrop_draw(fb, W, H);
-    backdrop_shade(fb, W, H, mx - 16, y0 - 10, W - 2 * mx + 32, (row_count() + 4) * row_h + 20);
-    osd_text(fb, W, H, mx, my, "Orbis Mozi", COL_TEXT, 0);
-    osd_text(fb, W, H, mx, my + fh + 4, F.is_new ? "Add a network share" : "Change a network share",
-             COL_DIM, 0);
+    ui_image(fb, W, H, 87, 97, F.is_new ? UI_IMG_PLUS : UI_IMG_SHARE);
+    ui_text(fb, W, H, 128, 109, UI_FONT_TEXT, F.is_new ? "Add network share" : "Edit network share", COL_TEXT);
+    osd_fill(fb, W, H, MX, 147, W - 2 * MX, 1, COL_TEXT);
 
-    for (int i = 0; i < row_count(); i++) {
-        int y = y0 + i * row_h + (i >= N_FIELDS ? row_h / 2 : 0);
-        int sel = i == F.sel;
-        uint32_t bg = sel ? COL_SEL_BG : 0;
+    for (int i = 0; i < N_FIELDS; i++) {
+        int y = field_y(i), size;
+        const char *text = field_text(i, &size);
+        size_t len = strlen(text);
+        char value[300];
 
-        if (sel)
-            osd_fill(fb, W, H, mx, y, W - 2 * mx, row_h, bg);
-        if (i < N_FIELDS) {
-            char shown[300];
-            int size;
-            const char *text = field_text(i, &size);
-            size_t len = strlen(text);
-
-            if (i == F_PASSWORD) {
-                memset(shown, '*', len);
-                shown[len] = '\0';
-            } else {
-                snprintf(shown, sizeof(shown), "%s", text);
-            }
-            if ((int)strlen(shown) > max_chars)
-                strcpy(shown + max_chars - 3, "...");
-            osd_text(fb, W, H, mx + fw, y + 5, g_fields[i].label, sel ? 0xFFFFFFFFu : COL_DIM, bg);
-            osd_text(fb, W, H, value_x, y + 5, len ? shown : "-", sel ? 0xFFFFFFFFu : COL_TEXT, bg);
+        if (i == F_PASSWORD) {
+            if (len > 40)
+                len = 40;
+            memset(value, '*', len);
+            value[len] = '\0';
         } else {
-            const char *label = i == A_TEST ? "Test connection" : i == A_SAVE ? "Save" : "Delete this share";
-            osd_text(fb, W, H, mx + fw, y + 5, label, sel ? 0xFFFFFFFFu : COL_TEXT, bg);
+            snprintf(value, sizeof(value), "%s", text);
         }
+        ui_dim(fb, W, H, MX, y, W - 2 * MX, FIELD_H, ROW_KEEP);
+        if (i == F.sel)
+            select_frame(fb, W, H, MX, y, W - 2 * MX, FIELD_H);
+        int label_end = ui_text(fb, W, H, 130, y + 35, UI_FONT_TEXT, g_fields[i].label, COL_TEXT);
+        ui_fit(UI_FONT_TEXT, len ? value : "-", 1164 - label_end - 40, shown, sizeof(shown));
+        ui_text(fb, W, H, 1164 - ui_text_width(UI_FONT_TEXT, shown), y + 35, UI_FONT_TEXT, shown, COL_TEXT);
     }
 
-    int msg_y = y0 + (row_count() + 2) * row_h;
-    if (F.busy)
-        osd_text(fb, W, H, mx + fw, msg_y, F.busy, COL_DIM, 0);
-    else if (F.message[0])
-        osd_text(fb, W, H, mx + fw, msg_y, F.message, F.message_colour, 0);
+    for (int i = F.is_new ? A_TEST : A_DELETE; i <= A_SAVE; i++) {
+        const char *label = g_buttons[i - A_DELETE].label;
+        int x = g_buttons[i - A_DELETE].x, w = g_buttons[i - A_DELETE].w;
 
-    if (F.sel < N_FIELDS)
-        osd_text(fb, W, H, mx, H - my - 2 * fh - 4, g_fields[F.sel].hint, COL_DIM, 0);
-    osd_text(fb, W, H, mx, H - my - fh, F.sel < N_FIELDS ? "X edit    O cancel" : "X choose    O cancel",
-             COL_DIM, 0);
+        if (i == A_SAVE)
+            osd_fill(fb, W, H, x, BUTTON_Y, w, BUTTON_H, COL_SAVE_BG);
+        else
+            ui_dim(fb, W, H, x, BUTTON_Y, w, BUTTON_H, ROW_KEEP);
+        if (i == F.sel)
+            select_frame(fb, W, H, x, BUTTON_Y, w, BUTTON_H);
+        ui_text(fb, W, H, x + (w - ui_text_width(UI_FONT_TEXT, label)) / 2, BUTTON_Y + 47, UI_FONT_TEXT,
+                label, i == A_SAVE ? COL_SAVE : COL_TEXT);
+    }
+
+    int x = ui_hint(fb, W, H, MX - 1, UI_IMG_CROSS, F.sel < N_FIELDS ? "Edit" : "Select");
+    x = ui_hint(fb, W, H, x, UI_IMG_CIRCLE, "Cancel");
+
+    /* To the right of the button hints: what is going on, else help for the selected field. */
+    const char *note = F.busy ? F.busy : F.sel < N_FIELDS ? g_fields[F.sel].hint : F.message;
+    uint32_t colour = F.busy || F.sel < N_FIELDS ? COL_TEXT : F.message_colour;
+    ui_fit(UI_FONT_TEXT, note, W - MX - x, shown, sizeof(shown));
+    ui_text(fb, W, H, W - MX - ui_text_width(UI_FONT_TEXT, shown), 644, UI_FONT_TEXT, shown, colour);
     plat_flip();
 }
 
 static void say(uint32_t colour, const char *text)
 {
-    int max_chars = (plat_width() - 2 * (plat_width() / 20)) / osd_font_width() - 2;
-
     snprintf(F.message, sizeof(F.message), "%s", text);
-    if (max_chars < (int)sizeof(F.message) - 1 && (int)strlen(F.message) > max_chars)
-        strcpy(F.message + max_chars - 3, "...");
     F.message_colour = colour;
 }
 
@@ -169,7 +190,7 @@ int shareform_run(char *url, size_t url_size, int is_new)
         unsigned pad = plat_pad();
         unsigned pressed = pad & ~prev;
         uint64_t now = plat_time_us();
-        const unsigned moves = PAD_UP | PAD_DOWN;
+        const unsigned moves = PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT;
 
         if (pressed & moves) {
             repeat_at = now + 350000;
@@ -179,9 +200,18 @@ int shareform_run(char *url, size_t url_size, int is_new)
         }
         prev = pad;
 
-        int n = row_count();
-        if (pressed & PAD_UP)   F.sel = (F.sel + n - 1) % n;
-        if (pressed & PAD_DOWN) F.sel = (F.sel + 1) % n;
+        /* The fields are a column; the buttons under them are one row. Down from the
+         * last field lands on Save, and the list wraps around at both ends. */
+        int first = F.is_new ? A_TEST : A_DELETE;
+        if (F.sel < N_FIELDS) {
+            if (pressed & PAD_UP)   F.sel = F.sel > 0 ? F.sel - 1 : A_SAVE;
+            if (pressed & PAD_DOWN) F.sel = F.sel < N_FIELDS - 1 ? F.sel + 1 : A_SAVE;
+        } else {
+            if (pressed & PAD_UP)                           F.sel = N_FIELDS - 1;
+            else if (pressed & PAD_DOWN)                    F.sel = 0;
+            else if ((pressed & PAD_LEFT) && F.sel > first) F.sel--;
+            else if ((pressed & PAD_RIGHT) && F.sel < A_SAVE) F.sel++;
+        }
 
         if (pressed & PAD_CIRCLE)
             return FORM_CANCEL;

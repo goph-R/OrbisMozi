@@ -248,13 +248,6 @@ static int visible_rows(void)
     return B.cur[0] ? LIST_ROWS : ROOT_ROWS;
 }
 
-/* A button picture with its label; returns where the next one starts. */
-static int hint(uint32_t *fb, int W, int H, int x, int image, const char *label)
-{
-    ui_image(fb, W, H, x + 24, 635, image);
-    return ui_text(fb, W, H, x + 67, 644, UI_FONT_TEXT, label, COL_TEXT) + 79;
-}
-
 static void draw_root_row(uint32_t *fb, int W, int H, int i, int y)
 {
     char path[PATH_MAX_], fitted[PATH_MAX_];
@@ -366,15 +359,15 @@ static void draw(const char *busy)
     }
 
     /* Bottom: what the buttons do, and the place in the list. */
-    int x = hint(fb, W, H, MX - 1, UI_IMG_CROSS, "Open");
+    int x = ui_hint(fb, W, H, MX - 1, UI_IMG_CROSS, "Open");
     if (B.cur[0]) {
-        hint(fb, W, H, x, UI_IMG_CIRCLE, "Back");
+        ui_hint(fb, W, H, x, UI_IMG_CIRCLE, "Back");
         if (n > 0) {
             snprintf(text, sizeof(text), "%d / %d", B.sel + 1, n);
             ui_text(fb, W, H, W - MX - ui_text_width(UI_FONT_TEXT, text), 644, UI_FONT_TEXT, text, COL_TEXT);
         }
     } else {
-        hint(fb, W, H, x, UI_IMG_SQUARE, "Change / Delete a share");
+        ui_hint(fb, W, H, x, UI_IMG_SQUARE, "Change / Delete a share");
     }
 
     plat_flip();
