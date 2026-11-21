@@ -288,6 +288,9 @@ It prints the same log as the console build, ending with a summary line
 | `src/textinput.c` | text entry: the system keyboard, or a built-in one |
 | `src/main.c` | start-up and the loop: pick a file, play it, repeat |
 
+The mockups the menu screens are built from are in `design/` (layered PSD
+files at 1920x1080, drawn in PhotoCraft), together with the icon's source.
+
 Four threads: one reads packets from the file, one decodes video, one decodes
 audio and feeds the audio device, and the main thread shows each frame when the
 audio clock reaches its timestamp. Audio is the master clock, so picture and
