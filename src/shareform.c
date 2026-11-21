@@ -148,6 +148,8 @@ static int confirm(const char *question, const char *detail)
     enum { BOX_W = 620, BOX_H = 250, BTN_W = 175, BTN_H = 54, GAP = 28 };
     unsigned prev = plat_pad();
     int ok = 0;
+    uint32_t *still = NULL;   /* the dimmed form, painted once: the backdrop stops moving */
+    int still_w = 0, still_h = 0;
 
     for (;;) {
         uint32_t *fb = plat_backbuffer();
@@ -156,8 +158,19 @@ static int confirm(const char *question, const char *detail)
         int ok_x = W / 2 - GAP / 2 - BTN_W, cancel_x = W / 2 + GAP / 2, btn_y = by + BOX_H - BTN_H - 36;
         char shown[300];
 
-        paint(fb, W, H);
-        ui_dim(fb, W, H, 0, 0, W, H, 110);
+        if (still && still_w == W && still_h == H) {
+            memcpy(fb, still, (size_t)W * H * sizeof(*fb));
+        } else {
+            paint(fb, W, H);
+            ui_dim(fb, W, H, 0, 0, W, H, 110);
+            free(still);
+            still = malloc((size_t)W * H * sizeof(*fb));
+            if (still) {
+                memcpy(still, fb, (size_t)W * H * sizeof(*fb));
+                still_w = W;
+                still_h = H;
+            }
+        }
         osd_fill(fb, W, H, bx, by, BOX_W, BOX_H, COL_BOX);
         ui_frame(fb, W, H, bx, by, BOX_W, BOX_H, 1, COL_TEXT);
         ui_text(fb, W, H, (W - ui_text_width(UI_FONT_TEXT, question)) / 2, by + 62, UI_FONT_TEXT, question, COL_TEXT);
@@ -177,8 +190,11 @@ static int confirm(const char *question, const char *detail)
         prev = pad;
         if (pressed & PAD_LEFT)   ok = 1;
         if (pressed & PAD_RIGHT)  ok = 0;
-        if (pressed & PAD_CIRCLE) return 0;
-        if (pressed & PAD_CROSS)  return ok;
+        if (pressed & PAD_CIRCLE) ok = 0;
+        if (pressed & (PAD_CIRCLE | PAD_CROSS)) {
+            free(still);
+            return ok;
+        }
     }
 }
 
