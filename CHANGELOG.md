@@ -6,6 +6,8 @@ numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-21
+
 First report from a base PS4: a 1080p H.264 film from a Samba share plays
 without dropped frames.
 
@@ -19,6 +21,8 @@ without dropped frames.
   and the audio track in use.
 - Circle pauses and opens a menu: continue, choose subtitles, choose audio,
   picture, rewind, help and exit.
+- Picture subtitles inside the file (Blu-ray PGS, DVD, DVB) are listed and
+  shown.
 - Picture modes: fit (the whole picture), fill (no borders, edges cut off)
   and stretch.
 - The share form in its designed look, with a question before a share is
@@ -58,4 +62,5 @@ The first public release.
 - Multichannel audio is mixed down to stereo.
 - USB drives cannot be read; an application's sandbox does not contain them.
 
+[1.0.0]: https://github.com/goph-R/OrbisMozi/releases/tag/v1.0.0
 [0.1.0]: https://github.com/goph-R/OrbisMozi/releases/tag/v0.1.0

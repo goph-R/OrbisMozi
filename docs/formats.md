@@ -56,7 +56,9 @@ A 1080p film from a network share (Samba) starts in well under a second.
 ## Limits
 
 - 4K and heavy H.265 files are not expected to play smoothly.
-- Picture-based subtitles (Blu-ray PGS, DVD) are not supported yet.
+- Picture subtitles (Blu-ray PGS, DVD, DVB) are drawn where the disc had
+  them, also in the fill and stretch picture modes. They were tested with
+  FFmpeg's sample files on a PC, not yet with a real film on a console.
 - A subtitle file beside the video is used when it has the video's exact name
   with the `.srt` extension (`Film.mkv` and `Film.srt`). It is switched on by
   itself and comes first in the list, before the tracks inside the video.

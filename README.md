@@ -20,6 +20,19 @@ Player refuses: MKV and other containers, decoded with FFmpeg.</p>
   <em>Main menu</em>
 </p>
 
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshot-overlay.jpg" alt="A film playing with a subtitle and the overlay: position bar, subtitle and audio track"><br><em>Overlay while playing</em></td>
+    <td align="center"><img src="docs/screenshot-pause.jpg" alt="The pause menu over the dimmed picture: continue, subtitles, audio, picture, rewind, help, exit"><br><em>Pause menu</em></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshot-files.jpg" alt="The file list showing the folders of the console's video folder"><br><em>File list</em></td>
+    <td align="center"><img src="docs/screenshot-share.jpg" alt="The network share form: server IP, share, user, password, folder"><br><em>Network share form</em></td>
+  </tr>
+</table>
+
+<p align="center"><sub>The film in the screenshots is <em>Sintel</em>, © Blender Foundation | durian.blender.org, CC BY 3.0.</sub></p>
+
 Orbis Mozi plays your own video files on a PlayStation 4: from the console's
 disk, or straight from a shared folder on your home network. It needs a
 console that can run homebrew packages, for example with GoldHEN.
@@ -32,9 +45,10 @@ console that can run homebrew packages, for example with GoldHEN.
   and more, with H.264, H.265, MPEG-4 (Xvid, DivX), MPEG-2, VP8 and VP9 video.
 - **Network shares:** plays directly from a Windows or Samba share (SMB2/SMB3),
   with nothing to copy.
-- **Subtitles and audio tracks:** text subtitles inside the file (SRT, ASS),
-  or from an `.srt` file with the video's name beside it, with accented
-  letters, and a choice between the file's audio tracks.
+- **Subtitles and audio tracks:** text subtitles inside the file (SRT, ASS)
+  with accented letters, picture subtitles (Blu-ray, DVD), an `.srt` file
+  with the video's name beside it, and a choice between the file's audio
+  tracks.
 - **The usual controls:** pause, jumps of 10 seconds and 10 minutes, and
   volume up to 200%.
 
@@ -96,7 +110,6 @@ USB drives cannot be read: a PS4 application is not allowed to see them.
   film from a Samba share, no dropped frames). Reports from other models are
   welcome.
 - 4K and heavy H.265 files are not expected to play smoothly.
-- Picture-based subtitles (Blu-ray, DVD) are not supported yet.
 - Surround sound is mixed down to stereo.
 
 **If something does not work**, the app writes a log to

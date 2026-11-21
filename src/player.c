@@ -45,6 +45,7 @@
 #define NET_BUFFER      (256 * 1024)        /* read-ahead for files on a share */
 #define CUE_CAP         256                 /* subtitle lines kept ready, all tracks together */
 #define MAX_TRACKS      32
+#define PIC_CAP         32                  /* subtitle pictures kept ready (one track) */
 #define RESUME_MARGIN   15.0                /* seconds: no continuing this close to either end */
 
 typedef struct {
@@ -64,6 +65,17 @@ typedef struct {
     int    stream;                      /* the subtitle track it belongs to */
     char   text[400];
 } Cue;
+
+/* A subtitle that is a picture (Blu-ray, DVD, DVB): a rectangle of colour
+ * numbers on a canvas of its own, which stands for the whole film frame. */
+typedef struct {
+    double    start, end;               /* stream time */
+    int       x, y, w, h, canvas_w, canvas_h;
+    uint8_t  *index;                    /* w*h colour numbers */
+    uint32_t  palette[256];             /* 0xAARRGGBB */
+    uint32_t *scaled;                   /* sized for the screen on first use; sw*sh, colours times alpha */
+    int       sx, sy, sw, sh, for_w, for_h;
+} PicCue;
 
 static int g_volume = 100;              /* percent, 0..200; kept between files */
 
@@ -94,6 +106,12 @@ static struct {
     int              sdec_stream[MAX_TRACKS], n_sdec;
     Cue              cues[CUE_CAP];
     int              cue_next;          /* ring position for the next cue */
+
+    /* Picture subtitles are large, so only the chosen track is decoded;
+     * choosing another one takes effect through a seek, like sound. */
+    int              pic_stream;        /* -1 = none */
+    PicCue           pics[PIC_CAP];
+    int              pic_next;
 
     int              serial;            /* increased by every completed seek */
     int              seek_req;
@@ -201,6 +219,68 @@ static void ass_to_text(const char *ass, char *out, size_t out_size)
     out[n] = '\0';
 }
 
+static int is_text_codec(enum AVCodecID id)
+{
+    const AVCodecDescriptor *d = avcodec_descriptor_get(id);
+    return d && (d->props & AV_CODEC_PROP_TEXT_SUB);
+}
+
+static void pics_clear(void)            /* with P.lock held */
+{
+    for (int k = 0; k < PIC_CAP; k++) {
+        free(P.pics[k].index);
+        free(P.pics[k].scaled);
+    }
+    memset(P.pics, 0, sizeof(P.pics));
+}
+
+/* A picture subtitle of the chosen track. Each new one ends what was on
+ * the screen before it; one without a picture only does that. */
+static void decode_picture_subtitle(AVCodecContext *dec, AVPacket *pkt)
+{
+    AVSubtitle sub;
+    int got = 0;
+
+    pthread_mutex_lock(&P.lock);
+    int wanted = P.pic_stream == pkt->stream_index;
+    pthread_mutex_unlock(&P.lock);
+    if (!wanted || avcodec_decode_subtitle2(dec, &sub, &got, pkt) < 0 || !got)
+        return;
+
+    double tb = av_q2d(P.fmt->streams[pkt->stream_index]->time_base);
+    double start = (pkt->pts != AV_NOPTS_VALUE ? pkt->pts * tb : 0.0) + sub.start_display_time / 1000.0;
+    double length = sub.end_display_time > 0 && sub.end_display_time != UINT32_MAX
+                  ? (sub.end_display_time - sub.start_display_time) / 1000.0
+                  : pkt->duration > 0 ? pkt->duration * tb : 60.0;      /* 60: until the next one says otherwise */
+
+    pthread_mutex_lock(&P.lock);
+    for (int k = 0; k < PIC_CAP; k++)
+        if (P.pics[k].index && P.pics[k].end > start)
+            P.pics[k].end = start;
+    pthread_mutex_unlock(&P.lock);
+
+    for (unsigned i = 0; i < sub.num_rects; i++) {
+        const AVSubtitleRect *r = sub.rects[i];
+        PicCue cue = { .start = start, .end = start + length, .x = r->x, .y = r->y, .w = r->w, .h = r->h,
+                       .canvas_w = dec->width, .canvas_h = dec->height };
+
+        if (r->type != SUBTITLE_BITMAP || !r->data[0] || !r->data[1] || r->w <= 0 || r->h <= 0 ||
+            r->w > 4096 || r->h > 4096 || !(cue.index = malloc((size_t)r->w * r->h)))
+            continue;
+        for (int row = 0; row < r->h; row++)
+            memcpy(cue.index + (size_t)row * r->w, r->data[0] + (size_t)row * r->linesize[0], (size_t)r->w);
+        memcpy(cue.palette, r->data[1], (size_t)(r->nb_colors > 0 && r->nb_colors <= 256 ? r->nb_colors : 256) * 4);
+
+        pthread_mutex_lock(&P.lock);
+        free(P.pics[P.pic_next].index);
+        free(P.pics[P.pic_next].scaled);
+        P.pics[P.pic_next] = cue;
+        P.pic_next = (P.pic_next + 1) % PIC_CAP;
+        pthread_mutex_unlock(&P.lock);
+    }
+    avsubtitle_free(&sub);
+}
+
 /* Decodes the packet if it belongs to a subtitle track. */
 static void decode_subtitle(AVPacket *pkt)
 {
@@ -211,7 +291,13 @@ static void decode_subtitle(AVPacket *pkt)
     for (int k = 0; k < P.n_sdec; k++)
         if (P.sdec_stream[k] == pkt->stream_index)
             dec = P.sdec[k];
-    if (!dec || avcodec_decode_subtitle2(dec, &sub, &got, pkt) < 0 || !got)
+    if (!dec)
+        return;
+    if (!is_text_codec(dec->codec_id)) {
+        decode_picture_subtitle(dec, pkt);
+        return;
+    }
+    if (avcodec_decode_subtitle2(dec, &sub, &got, pkt) < 0 || !got)
         return;
 
     double tb = av_q2d(P.fmt->streams[pkt->stream_index]->time_base);
@@ -281,6 +367,7 @@ static void *demux_thread(void *arg)
                 pktq_clear(&P.vq);
                 pktq_clear(&P.aq);
                 memset(P.cues, 0, sizeof(P.cues));
+                pics_clear();
                 if (audio_want >= 0 && P.aidx >= 0)
                     P.aidx = audio_want;
                 P.serial++;
@@ -589,6 +676,7 @@ typedef struct {
     int src_w, src_h, src_fmt;
     int dst_x, dst_y, dst_w, dst_h;
     int mode;                           /* the PICTURE_* it was set up for */
+    double aspect;                      /* shape of the whole film frame, width / height */
     int crop_x, crop_y, crop_w, crop_h; /* the part of the source that is shown */
     int clear_pending;                  /* buffers that still need black borders */
 } Scaler;
@@ -616,6 +704,7 @@ static int scaler_setup(Scaler *s, const AVFrame *f, AVRational stream_sar)
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
     int cx = 0, cy = 0, cw = f->width, ch = f->height;
     s->mode = g_picture;
+    s->aspect = aspect;
     if (s->mode != PICTURE_FIT) {
         dw = W;
         dh = H;
@@ -698,48 +787,153 @@ static void format_time(char *out, size_t out_size, double seconds)
     snprintf(out, out_size, "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60);
 }
 
+/* --- drawing picture subtitles ------------------------------------------------ */
+
+/* Makes the screen-sized copy of a subtitle picture: smooth scaling, with
+ * the colours already multiplied by their transparency. The canvas is laid
+ * on the screen the way the whole film frame would be, borders included, so
+ * the lines sit where the disc had them whatever the picture mode is. */
+static void pic_scale(PicCue *c, int W, int H, double frame_aspect, int frame_w, int frame_h)
+{
+    int cw = c->canvas_w > 0 ? c->canvas_w : frame_w, ch = c->canvas_h > 0 ? c->canvas_h : frame_h;
+    if (cw < c->x + c->w) cw = c->x + c->w;
+    if (ch < c->y + c->h) ch = c->y + c->h;
+
+    /* A canvas the size of the film frame has the frame's shape (DVD pixels are not square). */
+    double aspect = cw == frame_w && ch == frame_h ? frame_aspect : (double)cw / ch;
+    double rw = W, rh = W / aspect;
+    if (rh > H) {
+        rh = H;
+        rw = H * aspect;
+    }
+    double kx = rw / cw, ky = rh / ch;
+
+    free(c->scaled);
+    c->for_w = W;
+    c->for_h = H;
+    c->sx = (int)((W - rw) / 2 + c->x * kx);
+    c->sy = (int)((H - rh) / 2 + c->y * ky);
+    c->sw = (int)(c->w * kx + 0.5);
+    c->sh = (int)(c->h * ky + 0.5);
+    if (c->sw < 1) c->sw = 1;
+    if (c->sh < 1) c->sh = 1;
+    c->scaled = malloc((size_t)c->sw * c->sh * sizeof(uint32_t));
+    if (!c->scaled)
+        return;
+
+    for (int oy = 0; oy < c->sh; oy++) {
+        double fy = (oy + 0.5) / ky - 0.5;
+        int y0 = (int)floor(fy), wy = (int)((fy - y0) * 256);
+        int ya = y0 < 0 ? 0 : y0 >= c->h ? c->h - 1 : y0, yb = y0 + 1 < 0 ? 0 : y0 + 1 >= c->h ? c->h - 1 : y0 + 1;
+        for (int ox = 0; ox < c->sw; ox++) {
+            double fx = (ox + 0.5) / kx - 0.5;
+            int x0 = (int)floor(fx), wx = (int)((fx - x0) * 256);
+            int xa = x0 < 0 ? 0 : x0 >= c->w ? c->w - 1 : x0, xb = x0 + 1 < 0 ? 0 : x0 + 1 >= c->w ? c->w - 1 : x0 + 1;
+            const uint32_t px[4] = { c->palette[c->index[(size_t)ya * c->w + xa]], c->palette[c->index[(size_t)ya * c->w + xb]],
+                                     c->palette[c->index[(size_t)yb * c->w + xa]], c->palette[c->index[(size_t)yb * c->w + xb]] };
+            const int wt[4] = { (256 - wx) * (256 - wy), wx * (256 - wy), (256 - wx) * wy, wx * wy };
+            unsigned a = 0, r = 0, g = 0, b = 0;
+            for (int k = 0; k < 4; k++) {
+                unsigned pa = px[k] >> 24, w = (unsigned)wt[k];
+                a += pa * w;
+                r += (px[k] >> 16 & 255) * pa / 255 * w;
+                g += (px[k] >> 8 & 255) * pa / 255 * w;
+                b += (px[k] & 255) * pa / 255 * w;
+            }
+            c->scaled[(size_t)oy * c->sw + ox] = (a >> 16) << 24 | (r >> 16) << 16 | (g >> 16) << 8 | (b >> 16);
+        }
+    }
+}
+
+/* Draws the subtitle pictures that belong to this moment. Nothing may reach
+ * below `floor_y` (the overlay's top edge while it shows): a picture that
+ * would is moved up. Returns a number that changes when what is drawn does. */
+static unsigned draw_pics(uint32_t *fb, int W, int H, double clock, int floor_y,
+                          double frame_aspect, int frame_w, int frame_h)
+{
+    unsigned sig = 0;
+
+    pthread_mutex_lock(&P.lock);
+    for (int k = 0; k < PIC_CAP; k++) {
+        PicCue *c = &P.pics[k];
+        if (!c->index || !(clock >= c->start && clock < c->end))
+            continue;
+        if (!c->scaled || c->for_w != W || c->for_h != H)
+            pic_scale(c, W, H, frame_aspect, frame_w, frame_h);
+        if (!c->scaled)
+            continue;
+        int top = c->sy + c->sh > floor_y && c->sy > H / 2 ? floor_y - c->sh : c->sy;
+        sig = sig * 31 + (unsigned)(c->start * 1000.0) + (unsigned)top;
+        if (!fb)
+            continue;
+        for (int row = 0; row < c->sh; row++) {
+            int py = top + row;
+            if (py < 0 || py >= H)
+                continue;
+            for (int col = 0; col < c->sw; col++) {
+                int px = c->sx + col;
+                uint32_t s = c->scaled[(size_t)row * c->sw + col];
+                unsigned a = s >> 24;
+                if (!a || px < 0 || px >= W)
+                    continue;
+                uint32_t *d = &fb[(size_t)py * W + px];
+                unsigned keep = 255 - a;
+                unsigned r = (s >> 16 & 255) + (*d >> 16 & 255) * keep / 255;
+                unsigned g = (s >> 8 & 255) + (*d >> 8 & 255) * keep / 255;
+                unsigned b = (s & 255) + (*d & 255) * keep / 255;
+                *d = 0xFF000000u | (r > 255 ? 255 : r) << 16 | (g > 255 ? 255 : g) << 8 | (b > 255 ? 255 : b);
+            }
+        }
+    }
+    pthread_mutex_unlock(&P.lock);
+    return sig;
+}
+
 /* --- the overlay: what any button press brings up over the picture ---------- */
 
-static int overlay_height(int H) { return H * 120 / 720; }
+/* Sizes follow design/OrbisMozi-overlay.psd, which is drawn 1080 lines high. */
+static int ov(int v, int H) { return (v * H + 540) / 1080; }
 
-/* A strip at the bottom that fades in from nothing, with the subtitle and
- * sound track in use and the position in the film. duration <= 0: unknown. */
+static int overlay_height(int H) { return ov(320, H); }
+
+/* The times, the position bar in its white frame, and under them the
+ * subtitle and the sound track in use. duration <= 0: unknown. */
 static void draw_overlay(uint32_t *fb, int W, int H, double position, double duration,
                          const char *sub_name, const char *audio_name)
 {
     int font = H >= 1000 ? UI_FONT_TEXT : UI_FONT_SMALL;
-    int hh = overlay_height(H), y0 = H - hh, mx = W / 20;
-    int line1 = y0 + hh * 52 / 120, line2 = y0 + hh * 92 / 120;
-    char a[32], b[32] = "", left[200], right[200], fitted[200];
+    int hh = overlay_height(H), y0 = H - hh, mx = ov(84, H);
+    int fx = mx, fy = ov(820, H), fw = W - 2 * mx, fh = ov(45, H);  /* the frame around the bar */
+    int line = H >= 1000 ? 2 : 1, gap = ov(5, H);
+    int bx = fx + line + gap, by = fy + line + gap, bw = fw - 2 * (line + gap), bh = fh - 2 * (line + gap);
+    int times = fy - ov(15, H), names = fy + fh + ov(62, H);
+    char a[32], b[32], left[200], right[200], fitted[200];
 
-    for (int row = 0; row < hh; row++) {            /* eased: soft at the top, 80% black at the bottom */
+    for (int row = 0; row < hh; row++) {            /* eased: nothing at the top, 70% black at the bottom */
         double t = (double)(row + 1) / hh;
-        ui_dim(fb, W, H, 0, y0 + row, W, 1, 256 - (int)(205.0 * t * t * (3.0 - 2.0 * t)));
+        ui_dim(fb, W, H, 0, y0 + row, W, 1, 256 - (int)(180.0 * t * t * (3.0 - 2.0 * t)));
+    }
+
+    if (position < 0)
+        position = 0;
+    format_time(a, sizeof(a), position);
+    ui_text(fb, W, H, mx, times, font, a, 0xFFFFFFFFu);
+    if (duration > 0) {
+        double part = position / duration;
+        if (part > 1) part = 1;
+        format_time(b, sizeof(b), duration);
+        ui_text(fb, W, H, W - mx - ui_text_width(font, b), times, font, b, 0xFFFFFFFFu);
+        ui_frame(fb, W, H, fx, fy, fw, fh, line, 0xFFFFFFFFu);
+        osd_fill(fb, W, H, bx, by, bw, bh, 0xFF092F76u);
+        osd_fill(fb, W, H, bx, by, (int)(bw * part), bh, 0xFFFFFFFFu);
     }
 
     snprintf(left, sizeof(left), "Subtitles: %s", sub_name);
     snprintf(right, sizeof(right), "Audio: %s", audio_name);
     ui_fit(font, left, W / 2 - mx - 20, fitted, sizeof(fitted));
-    ui_text(fb, W, H, mx, line1, font, fitted, 0xFFFFFFFFu);
+    ui_text(fb, W, H, mx, names, font, fitted, 0xFFFFFFFFu);
     ui_fit(font, right, W / 2 - mx - 20, fitted, sizeof(fitted));
-    ui_text(fb, W, H, W - mx - ui_text_width(font, fitted), line1, font, fitted, 0xFFFFFFFFu);
-
-    if (position < 0)
-        position = 0;
-    format_time(a, sizeof(a), position);
-    ui_text(fb, W, H, mx, line2, font, a, 0xFFFFFFFFu);
-    if (duration > 0) {
-        format_time(b, sizeof(b), duration);
-        int tw = ui_text_width(font, b), gap = H * 18 / 720, bar_h = H >= 1000 ? 6 : 4;
-        int bx = mx + ui_text_width(font, "0:00:00") + gap, bw = W - mx - tw - gap - bx;
-        int by = line2 - (H >= 1000 ? 12 : 8);
-        double part = position / duration;
-        if (part > 1) part = 1;
-        ui_text(fb, W, H, W - mx - tw, line2, font, b, 0xFFFFFFFFu);
-        ui_dim(fb, W, H, bx, by, bw, bar_h, 90);
-        osd_fill(fb, W, H, bx, by, bw, bar_h, 0xFF5A5F6Eu);
-        osd_fill(fb, W, H, bx, by, (int)(bw * part), bar_h, 0xFFFFFFFFu);
-    }
+    ui_text(fb, W, H, W - mx - ui_text_width(font, fitted), names, font, fitted, 0xFFFFFFFFu);
 }
 
 static void log_to_screen(void *avcl, int level, const char *fmt, va_list ap)
@@ -758,11 +952,13 @@ static void log_to_screen(void *avcl, int level, const char *fmt, va_list ap)
     }
 }
 
-/* Text subtitles only: pictures (Blu-ray, DVD) cannot be drawn yet. */
-static int is_text_subtitle(const AVStream *st)
+/* Text subtitles, and the three kinds of picture subtitles. */
+static int is_usable_subtitle(const AVStream *st)
 {
-    const AVCodecDescriptor *d = avcodec_descriptor_get(st->codecpar->codec_id);
-    return d && (d->props & AV_CODEC_PROP_TEXT_SUB) && avcodec_find_decoder(st->codecpar->codec_id);
+    enum AVCodecID id = st->codecpar->codec_id;
+    int picture = id == AV_CODEC_ID_HDMV_PGS_SUBTITLE || id == AV_CODEC_ID_DVD_SUBTITLE ||
+                  id == AV_CODEC_ID_DVB_SUBTITLE;
+    return (is_text_codec(id) || picture) && avcodec_find_decoder(id);
 }
 
 /* --- files on a network share -------------------------------------------- */
@@ -842,6 +1038,15 @@ static const char *language_name(const char *code)
         { "chi", "Chinese" }, { "zho", "Chinese" }, { "kor", "Korean" }, { "vie", "Vietnamese" },
         { "hrv", "Croatian" }, { "srp", "Serbian" }, { "slv", "Slovenian" }, { "bul", "Bulgarian" },
     };
+    static const char *const two[][2] = {       /* DVD subtitle files use two letters */
+        { "en", "eng" }, { "hu", "hun" }, { "de", "ger" }, { "fr", "fre" }, { "es", "spa" }, { "it", "ita" },
+        { "nl", "dut" }, { "pl", "pol" }, { "pt", "por" }, { "ru", "rus" }, { "cs", "cze" }, { "sk", "slo" },
+        { "ro", "rum" }, { "sv", "swe" }, { "no", "nor" }, { "da", "dan" }, { "fi", "fin" }, { "el", "gre" },
+        { "tr", "tur" }, { "ja", "jpn" }, { "zh", "chi" }, { "ko", "kor" }, { "uk", "ukr" }, { "hr", "hrv" },
+    };
+    for (size_t i = 0; i < sizeof(two) / sizeof(two[0]); i++)
+        if (strcmp(code, two[i][0]) == 0)
+            code = two[i][1];
     for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
         if (strcmp(code, known[i][0]) == 0)
             return known[i][1];
@@ -1036,6 +1241,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     int rc;
 
     memset(&P, 0, sizeof(P));
+    P.pic_stream = -1;
     pthread_mutex_init(&P.lock, NULL);
     pthread_cond_init(&P.cond, NULL);
     av_log_set_callback(log_to_screen);
@@ -1110,7 +1316,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         if (t->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && n_audio < MAX_TRACKS &&
             avcodec_find_decoder(t->codecpar->codec_id))
             audio_tracks[n_audio++] = (int)i;
-        if (t->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE && n_subs < MAX_TRACKS && is_text_subtitle(t))
+        if (t->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE && n_subs < MAX_TRACKS && is_usable_subtitle(t))
             sub_tracks[n_subs++] = (int)i;
     }
     for (int i = 0; i < n_subs; i++) {
@@ -1265,8 +1471,21 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             continue;
         }
 
+        /* A picture subtitle track was chosen or left: tell the demux thread,
+         * and read the file again from here so its lines are there at once. */
+        int pic_want = sub_sel >= have_ext &&
+                       !is_text_codec(P.fmt->streams[sub_tracks[sub_sel - have_ext]]->codecpar->codec_id)
+                     ? sub_tracks[sub_sel - have_ext] : -1;
+        int pic_switch = 0;
+        if (pic_want != P.pic_stream && !isnan(pos)) {
+            pthread_mutex_lock(&P.lock);
+            P.pic_stream = pic_want;
+            pthread_mutex_unlock(&P.lock);
+            pic_switch = pic_want >= 0;
+        }
+
         int toggle_pause = 0;
-        if ((step != 0.0 || audio_switch >= 0) && !isnan(pos)) {
+        if ((step != 0.0 || audio_switch >= 0 || pic_switch) && !isnan(pos)) {
             double base = seeking ? seek_goal : pos;
             double target = base + step;
             if (duration > 0 && target > origin + duration - 5.0)
@@ -1274,7 +1493,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             if (target < origin)
                 target = origin;
 
-            if (fabs(target - base) > 0.5 || audio_switch >= 0) {   /* not already at that end of the file */
+            if (fabs(target - base) > 0.5 || audio_switch >= 0 || pic_switch) {   /* not already at that end of the file */
                 pthread_mutex_lock(&P.lock);
                 P.seek_target = target;
                 P.seek_from = base;
@@ -1431,6 +1650,9 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
         for (const char *c = sub_text; *c; c++)
             sig = sig * 31 + (unsigned char)*c;
         sig = sig * 31 + (unsigned)(sub_sel + 1) * 64 + (unsigned)P.aidx_want;
+        int pic_floor = bar_on ? plat_height() - overlay_height(plat_height()) : plat_height();
+        sig = sig * 31 + draw_pics(NULL, plat_width(), plat_height(), clock, pic_floor,
+                                   scaler.aspect, scaler.src_w, scaler.src_h);
         if (sig != overlay_sig || menu_wanted) {
             overlay_sig = sig;
             scaler.clear_pending = 2;
@@ -1486,6 +1708,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             menu_wanted = 0;
             if (sub_text[0])
                 subfont_draw(fb, W, H, sub_text, H - H / 20);
+            draw_pics(fb, W, H, clock, H, scaler.aspect, scaler.src_w, scaler.src_h);
             menu.audio_now = P.aidx_want;
             wall_start += pause_menu(&menu, fb);
             if (menu.leave)
@@ -1497,6 +1720,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
             continue;
         }
 
+        draw_pics(fb, W, H, clock, pic_floor, scaler.aspect, scaler.src_w, scaler.src_h);
         if (show_stats)
             osd_text(fb, W, H, W / 20, H / 20, stat_line, 0xFFFFFFFFu, 0xFF000000u);
         if (note_on)
@@ -1554,6 +1778,7 @@ int player_run(const char *path, double max_seconds, PlayerStats *stats)
     avcodec_free_context(&P.adec);
     for (int k = 0; k < P.n_sdec; k++)
         avcodec_free_context(&P.sdec[k]);
+    pics_clear();
     if (have_ext)
         extsub_free(&ext_sub);
     close_input(net);
